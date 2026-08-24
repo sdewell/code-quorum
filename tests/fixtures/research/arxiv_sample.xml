@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <id>http://arxiv.org/abs/2301.12345v1</id>
+    <published>2023-01-15T00:00:00Z</published>
+    <title>Diffusion Models for Tabular Data</title>
+    <summary>We present a diffusion approach to synthesizing tabular records.</summary>
+    <author><name>Ada Lovelace</name></author>
+    <author><name>Alan Turing</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2302.54321v2</id>
+    <published>2023-02-20T00:00:00Z</published>
+    <title>Score-Based Generative Modeling</title>
+    <summary>A unifying score-based framework.</summary>
+    <author><name>Grace Hopper</name></author>
+  </entry>
+</feed>

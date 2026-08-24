@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "quorum_codex": {
+      "command": "/bin/sh",
+      "args": [
+        "./scripts/run_codex_mcp_from_helper.sh",
+        "0.0.63"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "OPENROUTER_API_KEY",
+        "OPENALEX_API_KEY",
+        "QUORUM_OPENALEX_API_KEY",
+        "QUORUM_OPENALEX_EMAIL",
+        "CONTEXT7_API_KEY",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "HF_TOKEN",
+        "QUORUM_HF_TOKEN"
+      ],
+      "tool_timeout_sec": 2100
+    }
+  }
+}

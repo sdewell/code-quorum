@@ -1,0 +1,108 @@
+{
+  "hitCount": 920,
+  "resultList": {
+    "result": [
+      {
+        "id": "PPR1020847",
+        "source": "PPR",
+        "doi": "10.1101/2025.05.12.653389",
+        "title": "Probing as a new technique to assess single-cell RNA-seq batch correction",
+        "authorList": {
+          "author": [
+            {
+              "fullName": "Codicè F",
+              "firstName": "Francesco",
+              "lastName": "Codicè",
+              "initials": "F"
+            },
+            {
+              "fullName": "Fariselli P",
+              "firstName": "Piero",
+              "lastName": "Fariselli",
+              "initials": "P"
+            },
+            {
+              "fullName": "Raimondi D",
+              "firstName": "Daniele",
+              "lastName": "Raimondi",
+              "initials": "D"
+            }
+          ]
+        },
+        "pubYear": "2025",
+        "abstractText": "Single-cell RNA sequencing (scRNA-seq) is vulnerable to batch effects that could confound biological interpretation. We introduce the Batch Probing Score (BPS), a supervised metric quantifying residual batch signal after correction. Unlike existing unsupervised metrics, BPS directly measures the remaining batch signal that could affect downstream analysis. Evaluated on six datasets and six correction methods, BPS has the highest sensitivity among existing metrics used to evaluate batch correctors.",
+        "bookOrReportDetails": {
+          "publisher": "bioRxiv",
+          "yearOfPublication": 2025
+        },
+        "fullTextUrlList": {
+          "fullTextUrl": [
+            {
+              "availability": "Open access",
+              "availabilityCode": "OA",
+              "documentStyle": "pdf",
+              "site": "Unpaywall",
+              "url": "https://www.biorxiv.org/content/biorxiv/early/2025/05/15/2025.05.12.653389.full.pdf"
+            },
+            {
+              "availability": "Free",
+              "availabilityCode": "F",
+              "documentStyle": "doi",
+              "site": "DOI",
+              "url": "https://doi.org/10.1101/2025.05.12.653389"
+            }
+          ]
+        }
+      },
+      {
+        "id": "PPR1242733",
+        "source": "PPR",
+        "doi": "10.64898/2026.05.27.728166",
+        "title": "reComBat-seq: Regularized negative binomial regression for batch-effect correction in underdetermined transcriptomics datasets",
+        "authorList": {
+          "author": [
+            {
+              "fullName": "Stoyanova Z",
+              "firstName": "Zhasmina",
+              "lastName": "Stoyanova",
+              "initials": "Z"
+            },
+            {
+              "fullName": "Menche J",
+              "firstName": "Jörg",
+              "lastName": "Menche",
+              "initials": "J"
+            },
+            {
+              "fullName": "Malzl D",
+              "firstName": "Daniel",
+              "lastName": "Malzl",
+              "initials": "D",
+              "authorId": {
+                "type": "ORCID",
+                "value": "0000-0001-5765-6375"
+              }
+            }
+          ]
+        },
+        "pubYear": "2026",
+        "abstractText": "<h4>Motivation</h4>  Batch effect correction is essential for the integration of large-scale transcriptomics datasets such as single-cell RNA-seq or multi-study bulk RNA-seq datasets for reducing technical noise that may mask biological signal. Existing correction methods, either do not produce count data output which is crucial for state-of-the-art downstream analyses such as differential expression analysis or fail to converge in underdetermined study designs. <h4>Results</h4>  We present reComBat-seq, a method that extends the Negative Binomial regression framework of ComBat-seq by incorporating Elastic Net regularization. This approach resolves problems with rank-deficient design matrices while also preserving the integer nature of count data. Benchmarking on simulated and real datasets such as single-cell RNA-seq data demonstrates that reComBat-seq successfully removes batch effects in complex study designs while maintaining compatibility with downstream differential expression tools. <h4>Availability and Implementation</h4>  reComBat-seq source code can be found at  https://github.com/menchelab/reComBat-seq . All code to reproduce the presented analyses can be found at  https://github.com/menchelab/reComBatseq_Studies . Data produced in this study is available at  https://doi.org/10.5281/zenodo.19736515 . Used single-cell RNA-seq data can be found at  https://doi.org/10.5281/zenodo.14234956 .  <h4>Supplementary Information</h4>  Proofs and volcano plots of differential expression analysis",
+        "bookOrReportDetails": {
+          "publisher": "bioRxiv",
+          "yearOfPublication": 2026
+        },
+        "fullTextUrlList": {
+          "fullTextUrl": [
+            {
+              "availability": "Free",
+              "availabilityCode": "F",
+              "documentStyle": "doi",
+              "site": "DOI",
+              "url": "https://doi.org/10.64898/2026.05.27.728166"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+[project]
+name = "code-quorum"
+version = "0.0.63"
+description = "Multi-agent council for Claude Code and Codex"
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "MIT" }
+authors = [{ name = "Scott Dewell" }]
+dependencies = [
+    "google-antigravity>=0.1.4",
+    "httpx>=0.27",
+    "mcp>=1.28.1,<2",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+quorum = "quorum.cli:app"
+quorum-mcp = "quorum_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["quorum", "quorum_mcp"]
+
+[dependency-groups]
+dev = [
+    "pip-audit>=2.10.1",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "ty>=0.0.39",
+]
+
+[tool.ruff]
+# Declare line-length explicitly (= ruff's default). Without an in-repo
+# [tool.ruff], the global git pre-commit hook formats staged files with its
+# 120-col fallback config and re-stages them, while CI formats at the 88
+# default -- the two disagree and CI's `ruff format --check` fails. Pinning
+# it here makes the hook and CI use the same width.
+line-length = 88
+exclude = ["plugins/"]
+
+[tool.ty.environment]
+python-version = "3.13"
+
+[tool.ty.src]
+# One-off reproducibility scripts run via `uv run --no-project --with numpy ...`,
+# so they import deps (numpy/scipy/statsmodels/matplotlib) that are not project
+# dependencies. Type-checking them yields only unresolved-import false positives;
+# ruff still lints them. Exclude from ty.
+exclude = ["analysis/", "plugins/"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live: hits real external APIs; excluded from CI (run with -m live)",
+]
+addopts = "-m 'not live'"

@@ -1,0 +1,27 @@
+{
+  "name": "code-quorum",
+  "version": "0.0.63",
+  "description": "Multi-agent planning, review, and forward research for Claude and Codex hosts",
+  "author": {
+    "name": "sdewell"
+  },
+  "license": "MIT",
+  "keywords": ["claude", "codex", "multi-agent", "code-review", "planning", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Code Quorum",
+    "shortDescription": "External council seats for Codex",
+    "longDescription": "Code Quorum lets Codex run subscription-backed Claude, Gemini, and OpenCode council seats while Codex writes its own independent pass, then compare and synthesize the results for planning, brainstorming, validation, code review, and forward research.",
+    "developerName": "sdewell",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "Read"],
+    "defaultPrompt": [
+      "Run q-plan for this change.",
+      "Run q-review on my current branch.",
+      "Run q-skystorm for this forward-looking idea."
+    ],
+    "brandColor": "#111111",
+    "screenshots": []
+  }
+}

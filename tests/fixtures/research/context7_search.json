@@ -1,0 +1,6 @@
+{
+  "results": [
+    {"id": "/scikit-learn/scikit-learn", "title": "scikit-learn", "description": "Machine learning in Python.", "trustScore": 9.5},
+    {"id": "/low/trust", "title": "low-trust-lib", "description": "Untrusted.", "trustScore": 2.0}
+  ]
+}

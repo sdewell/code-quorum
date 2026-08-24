@@ -1,0 +1,32 @@
+{
+  "description": "Session-start housekeeping: reap orphaned quorum-mcp servers left behind by exited sessions, cap the opencode seat's unbounded sandbox database, and surface (free, once a day) when the installed agy has drifted from the version the gemini seat's sandbox was last live-verified against.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run_in_plugin_root_with_user_path.sh\" uv run --no-project python scripts/quorum_servers.py --reap --quiet",
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run_in_plugin_root_with_user_path.sh\" uv run --no-project python scripts/prune_opencode_db.py --quiet",
+            "timeout": 60
+          }
+        ]
+      },
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh \"${CLAUDE_PLUGIN_ROOT}/scripts/run_in_plugin_root_with_user_path.sh\" bash scripts/agy-drift-nag.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

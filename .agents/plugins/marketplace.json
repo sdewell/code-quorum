@@ -1,0 +1,20 @@
+{
+  "name": "code-quorum",
+  "interface": {
+    "displayName": "Code Quorum"
+  },
+  "plugins": [
+    {
+      "name": "code-quorum",
+      "source": {
+        "source": "local",
+        "path": "./plugins/code-quorum"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

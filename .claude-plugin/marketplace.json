@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "code-quorum",
+  "description": "Multi-agent council for Claude Code: parallel second opinions from Codex, Gemini, and other agents",
+  "owner": {
+    "name": "sdewell"
+  },
+  "plugins": [
+    {
+      "name": "code-quorum",
+      "displayName": "Code Quorum",
+      "source": "./",
+      "description": "/q-plan, /q-brainstorm, /q-skystorm, /q-validate, /q-review, /q-research via the quorum MCP server",
+      "category": "development"
+    }
+  ]
+}

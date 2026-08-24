@@ -1,0 +1,18 @@
+{
+  "results": [
+    {
+      "title": "Tabular Diffusion at Scale",
+      "publication_year": 2024,
+      "doi": "https://doi.org/10.48550/arXiv.2401.00001",
+      "authorships": [{"author": {"display_name": "Ada Lovelace"}}],
+      "abstract_inverted_index": {"We": [0], "scale": [1], "diffusion.": [2]}
+    },
+    {
+      "title": "A Survey of Generative Models",
+      "publication_year": 2022,
+      "doi": "https://doi.org/10.1109/TPAMI.2022.123",
+      "authorships": [{"author": {"display_name": "Katherine Johnson"}}],
+      "abstract_inverted_index": {"Survey": [0], "of": [1], "models.": [2]}
+    }
+  ]
+}

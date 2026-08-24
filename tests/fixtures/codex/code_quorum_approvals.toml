@@ -1,0 +1,17 @@
+[plugins."code-quorum@code-quorum".mcp_servers.quorum_codex.tools.q_plan_start]
+approval_mode = "approve"
+
+[plugins."code-quorum@code-quorum".mcp_servers.quorum_codex.tools.q_research]
+approval_mode = "approve"
+
+[plugins."code-quorum@code-quorum".mcp_servers.quorum_codex.tools.q_brainstorm_start]
+approval_mode = "approve"
+
+[plugins."code-quorum@code-quorum".mcp_servers.quorum_codex.tools.q_validate_start]
+approval_mode = "approve"
+
+[plugins."code-quorum@code-quorum".mcp_servers.quorum_codex.tools.q_review_start]
+approval_mode = "approve"
+
+[plugins."code-quorum@code-quorum".mcp_servers.quorum_codex.tools.q_await]
+approval_mode = "approve"

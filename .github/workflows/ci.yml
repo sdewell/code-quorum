@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # The LEARNINGS corpus is auto-committed/pushed to main by the SessionStart
+    # learnings hook; CI shouldn't run on a docs-only snapshot. Real code pushes
+    # still trigger it (and PRs always run the pull_request job below).
+    paths-ignore: ['LEARNINGS*.md', '*-PORTABLE-LEARNINGS.md', '.gitattributes']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Lockfile up-to-date
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev --locked
+
+      - name: Dependency vulnerability audit
+        run: uv run pip-audit --skip-editable
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Type check (ty)
+        run: uv run ty check
+
+      - name: Version sync check
+        run: uv run python scripts/sync_version.py --check
+
+      - name: Pytest
+        run: uv run pytest tests/ -q

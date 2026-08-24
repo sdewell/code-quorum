@@ -1,0 +1,5 @@
+import sklearn
+
+Snippet one about fitting.
+
+Snippet two about predicting.
