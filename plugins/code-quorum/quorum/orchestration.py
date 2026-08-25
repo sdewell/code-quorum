@@ -24,7 +24,7 @@ from .agents.gemini_cli import DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
 from .agents.opencode import make_opencode_agent
 from .agents.seat_helper import SeatHelperAgent
 from .context import _run_rc, resolve
-from .council import Mode, run_council
+from .council import AGENT_TIMEOUT_S, Mode, run_council
 from .hosts import HostProfile, resolve_host
 from .model_config import recorded_choice, resolve_model, seat_disabled
 from .roles import parse_role_arg
@@ -313,6 +313,7 @@ def _build_seat(
             model=agent.model,
             effort=agent.effort,
             model_source=agent.model_source,
+            timeout_s=AGENT_TIMEOUT_S,
         )
     return agent
 

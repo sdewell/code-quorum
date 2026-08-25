@@ -487,6 +487,7 @@ def test_codex_host_routes_subscription_seats_through_helper() -> None:
     assert isinstance(chosen["gemini"], sh.SeatHelperAgent)
     assert chosen["claude"].model == "claude-opus-5"
     assert chosen["claude"].effort == "medium"
+    assert chosen["claude"].timeout_s == 900.0
 
 
 def test_codex_helper_preserves_recorded_gemini_routing_metadata() -> None:

@@ -23,8 +23,8 @@ from .base import (
 # regardless of the developer's codex config. Reasoning effort rides `-c` because
 # codex exec has no dedicated flag; the key matches ~/.codex/config.toml's
 # `model_reasoning_effort` and the value is TOML-quoted, per `codex exec --help`.
-# terra/medium (was sol/xhigh): sol at xhigh routinely blew the council's 600s
-# AGENT_TIMEOUT_S on review-sized prompts (observed options-omega, 2026-07-20),
+# terra/medium (was sol/xhigh): sol at xhigh routinely blew the council's former
+# 600s AGENT_TIMEOUT_S on review-sized prompts (observed options-omega, 2026-07-20),
 # silently degrading the council to 2 seats. The seat must fit the wall clock.
 DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_EFFORT = "medium"

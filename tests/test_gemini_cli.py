@@ -1525,7 +1525,7 @@ def test_quota_reflex_predicate_requires_full_signature(tmp_path: Path) -> None:
     assert not gc._should_quota_reflex(res(output="partial"), *ok)
     assert not gc._should_quota_reflex(res(error="invalid model selection"), *ok)
     # Budget gate: the fallback attempt needs print-timeout + grace under the
-    # council's 600s cap, so a long-elapsed run must fail as itself.
+    # council's 900s cap, so a long-elapsed run must fail as itself.
     assert not gc._should_quota_reflex(
         res(), gc.AGY_QUOTA_REFLEX_MAX_ELAPSED_S, quota_log, gc.DEFAULT_MODEL
     )

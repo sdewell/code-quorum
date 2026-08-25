@@ -1118,7 +1118,7 @@ def test_opencode_council_md_allows_doom_loop() -> None:
     # which is unanswerable under headless `opencode run` (stdin=DEVNULL) --
     # opencode then raises a fatal UnknownError and the run exits 1 with empty
     # output. `deny` aborts the same way; only `allow` lets the run complete.
-    # The 600s AGENT_TIMEOUT_S (council.py) is the real backstop.
+    # The 900s AGENT_TIMEOUT_S (council.py) is the real backstop.
     assert "doom_loop: allow" in COUNCIL_AGENT_MD
 
 

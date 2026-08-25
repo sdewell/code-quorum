@@ -4,6 +4,7 @@ import pytest
 
 from quorum.agents import Agent, AgentResult
 from quorum.council import (
+    AGENT_TIMEOUT_S,
     REVIEW_REVISE_INSTRUCTION,
     REVIEW_REVISE_TERSE_INSTRUCTION,
     REVISE_INSTRUCTION,
@@ -14,6 +15,10 @@ from quorum.council import (
     run_council,
 )
 from quorum.roles import ROLES
+
+
+def test_default_agent_timeout_allows_fifteen_minute_call() -> None:
+    assert AGENT_TIMEOUT_S == 900.0
 
 
 def test_build_round_prompt_revise_includes_instruction() -> None:

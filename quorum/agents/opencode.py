@@ -72,7 +72,7 @@ _PROJECT_DISABLE_ENV = {
 # (stdin=DEVNULL) an "ask" is unanswerable -- opencode then raises a fatal
 # UnknownError and the run exits 1 with empty output. `deny` aborts the same way
 # (tested); only `allow` lets the run finish (the model breaks out of the repeat
-# on its own). The council's 600s AGENT_TIMEOUT_S (council.py) is a wall-clock
+# on its own). The council's 900s AGENT_TIMEOUT_S (council.py) is a wall-clock
 # cap on every production call routed through run_council (CLI and MCP); the
 # adapter's OPENCODE_IDLE_TIMEOUT_S idle cap (below) additionally kills a
 # stalled stream -- including a doom-loop that somehow spun without emitting --
@@ -168,7 +168,7 @@ DEFAULT_SMALL_MODEL = FLASH_MODEL
 # _build_opencode_config) to keep that gap well under ~85s; 240s is comfortable
 # margin above it while still catching a genuinely hung stream. This is an IDLE
 # timeout, not a wall-clock cap: a slow run that keeps streaming is never
-# killed. The council's 600s AGENT_TIMEOUT_S (council.py) is the wall-clock
+# killed. The council's 900s AGENT_TIMEOUT_S (council.py) is the wall-clock
 # backstop for run_council paths; this idle cap also bounds a direct
 # OpenCodeAgent.run() that bypasses run_council.
 OPENCODE_IDLE_TIMEOUT_S = 240.0

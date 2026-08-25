@@ -612,7 +612,7 @@ def check_seat_verified_version(installed: str | None = None) -> str | None:
 # Grace added to agy's own --print-timeout for the inner wait_for backstop. The
 # layering is: agy self-terminates at --print-timeout (480s); if it wedges and
 # ignores that, our inner wait_for fires at 480+30=510s; the council's hard
-# AGENT_TIMEOUT_S (600s) is the final cap. Kept under 600 so the inner backstop
+# AGENT_TIMEOUT_S (900s) is the final cap. Kept under 900 so the inner backstop
 # wins for the default timeout.
 GEMINI_CLI_TIMEOUT_GRACE_S = 30.0
 AGY_AUTH_CHECK_TIMEOUT_S = 20.0
@@ -666,7 +666,7 @@ AGY_AUTH_CHECK_TIMEOUT_S = 20.0
 #                  its own 10s subprocess timeout) is excluded, so a slow
 #                  probe cannot eat the window.
 # Worst case added by the retry: one crash-window + delay + one full attempt
-# (~10+5+510s), still under the council's 600s AGENT_TIMEOUT_S cap.
+# (~10+5+510s), still under the council's 900s AGENT_TIMEOUT_S cap.
 AGY_TRANSIENT_CRASH_MARKER = "Agent execution terminated due to error"
 AGY_STARTUP_CRASH_WINDOW_S = 10.0
 AGY_STARTUP_RETRY_DELAY_S = 5.0
@@ -698,7 +698,7 @@ _AGY_AUTH_REFRESH_TRANSPORT_MARKER = "token refresh failed due to network error"
 #
 # The elapsed gate is a BUDGET, deliberately anchored at run() entry -- unlike
 # the startup-crash window, which measures the attempt alone. The
-# council kills the seat at AGENT_TIMEOUT_S (600s), and a fallback attempt
+# council kills the seat at AGENT_TIMEOUT_S (900s), and a fallback attempt
 # needs print-timeout + grace (510s). Reflexing only under 60s of total
 # elapsed keeps the worst case ~570s. The 60s therefore INCLUDES preflight
 # (notably the `agy --version` probe, up to 10s) -- that is the point: the

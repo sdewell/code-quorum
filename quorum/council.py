@@ -20,7 +20,7 @@ Mode = Literal["revise", "critique"]
 # Hard ceiling per agent call. Agent CLIs legitimately take minutes to
 # review a codebase; this is a safety net against an unbounded hang (e.g.
 # a subprocess blocked on an interactive auth prompt), not a tight SLA.
-AGENT_TIMEOUT_S = 600.0
+AGENT_TIMEOUT_S = 900.0
 
 # Appended to every revision-round instruction. Round 2+ agents already read
 # the repo in round 1; a reasoning model that re-surveys it from scratch can

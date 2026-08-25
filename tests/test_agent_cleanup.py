@@ -1284,7 +1284,7 @@ async def test_communicate_lines_or_kill_returns_all_output_on_clean_exit() -> N
 
 @pytest.mark.asyncio
 async def test_communicate_lines_or_kill_cancellation_terminates_group() -> None:
-    """The council's 600s outer cap cancels the agent task; that cancellation
+    """The council's 900s outer cap cancels the agent task; that cancellation
     propagates through communicate_lines_or_kill, which must tear down the
     process group exactly like communicate_or_kill. The descendant PID is
     captured via a temp file so the test doesn't consume the stdout the
