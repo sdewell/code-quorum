@@ -21,7 +21,7 @@ depend on ambient process inference or the server's installation directory.
 | `quorum/council.py` | `run_council` — the round-by-round fan-out that returns a `rounds × agents` result matrix; per-agent containment; output/liveness formatting. |
 | `quorum/roles.py` | Cognitive stances (skeptic, architect, …) as per-phase prompt prefixes. |
 | `quorum/context.py` | Project-context assembly (LEARNINGS/CLAUDE.md + git + gh) injected into every prompt. |
-| `quorum/research.py` | Prior-art research over arXiv/OpenAlex/Europe PMC/Context7/GitHub/HuggingFace. Standalone — no council coupling. |
+| `quorum/research.py` | Prior-art research over arXiv/OpenAlex/Europe PMC published+preprints/Context7/GitHub/HuggingFace. Standalone — no council coupling. |
 | `quorum/agents/` | Backend adapters plus `seat_helper.py`, the Codex-host bridge for Claude and agy. |
 | `quorum_mcp/server.py` | Shared FastMCP server. `q_*_start` / `q_await` / `q_research` tools. |
 | `quorum_mcp/jobs.py` | The non-blocking background-job model (start returns a `job_id`; `q_await` blocks). |
@@ -91,7 +91,7 @@ A role is a **cognitive stance = a prompt prefix** that changes *how* an agent a
 
 ### Prior-art research
 
-`research_topic` (research.py) queries the six sources concurrently, each wrapped in `_contained` so a dead source lands in `digest.errors` instead of sinking its peers. Three of them are paper sources (`_PAPER_SOURCES`: arXiv, OpenAlex, Europe PMC) whose results merge into `digest.papers` and dedup by identifier/normalized-title. Europe PMC is pinned to the preprint stratum minus arXiv (`SRC:PPR NOT PUBLISHER:"arXiv"`), which is what makes it additive rather than a second helping of what OpenAlex and arXiv already return. The keyword backends (GitHub, HuggingFace) split a topic into its distinctive artifact-name terms (`_distinctive_terms`) and union the per-term results, with per-term failure isolation. It is standalone and is **not** subject to the anti-bias gate — it returns external prior art, not peer output, so it can be called during the orchestrator's own-work window.
+`research_topic` (research.py) accepts one to three semantic query lanes and runs the seven source adapters concurrently while keeping each adapter's own lanes sequential; arXiv lanes observe its polite request gap. Each attempt is wrapped in `_contained` so a dead source lands in `digest.errors` instead of sinking its peers, and rate-retry queueing has a bounded wait horizon. Four adapters are paper sources (`_PAPER_SOURCES`: arXiv, OpenAlex, Europe PMC published, Europe PMC preprints) whose results merge into `digest.papers` and dedup by identifier/normalized-title. The published Europe PMC adapter searches the non-preprint corpus with `core` metadata (abstracts, MeSH, and full-text availability); the preprint adapter remains pinned to `SRC:PPR NOT PUBLISHER:"arXiv"`. Methods-purpose OpenAlex searches balance all-time relevance candidates with a recent five-year stratum, while currency purpose keeps only the recent stratum. `SourceLaneStatus` classifies every source/lane attempt before `compute_status` summarizes it, preventing an aggregate verdict from hiding a collision or source mismatch. The keyword backends (GitHub, HuggingFace) retain their distinctive-term union and per-term failure isolation. The module is standalone and is **not** subject to the anti-bias gate — it returns external prior art, not peer output, so it can be called during the orchestrator's own-work window.
 
 ### MCP server & job model
 

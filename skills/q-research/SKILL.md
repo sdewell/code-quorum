@@ -1,6 +1,6 @@
 ---
 name: q-research
-description: Fetch publications and prior art for a topic — papers from arXiv, OpenAlex, and Europe PMC, plus library docs (Context7), GitHub repos, and HuggingFace models — returned as one markdown digest with links. Use when the user wants literature, publications, papers, or prior art pulled on a subject, without running the council. Pass the topic as the argument; add repeatable --source flags to restrict sources, --limit for max results per source, or --exploratory for cross-domain analogy hunting.
+description: Fetch publications and prior art for a topic — papers from arXiv, OpenAlex, and separate published/preprint Europe PMC lanes, plus library docs (Context7), GitHub repos, and HuggingFace models — returned as one markdown digest with links. Use when the user wants literature, publications, papers, or prior art pulled on a subject, without running the council. Pass the topic as the argument; add repeatable --source or --query-lane flags, --purpose methods|currency, --limit for max results per source, or --exploratory for cross-domain analogy hunting.
 ---
 
 # Q-Research — standalone prior-art digest
@@ -13,31 +13,51 @@ digest itself is the deliverable.
 
 `$ARGUMENTS` is the research topic, optionally with flags:
 - `--source <s>` / `-s <s>` (repeatable) — restrict to a subset of `arxiv`,
-  `openalex`, `europepmc`, `context7`, `github`, `huggingface`. Default: all
-  six. "Publications/literature only" means
-  `-s arxiv -s openalex -s europepmc`.
-- `--limit <n>` — max results per source (default 5). Below 3 the automatic
-  on-topic verdict cannot fire — see Step 3.
+  `openalex`, `europepmc-published`, `europepmc-preprints`, `context7`,
+  `github`, `huggingface`. Default: all seven. "Publications/literature only"
+  means `-s arxiv -s openalex -s europepmc-published -s europepmc-preprints`.
+- `--limit <n>` — max results per source (default 5, maximum 20). Below 3 the
+  automatic on-topic verdict cannot fire — see Step 3. The cap stays fixed
+  across lanes, so extra lanes broaden coverage without growing the digest.
+- `--purpose methods|currency` — `methods` is the default: OpenAlex balances
+  all-time canonical/relevance candidates with a recent five-year stratum and
+  retains the stratum labels after deduplication. `currency` queries only the
+  recent five-year stratum.
+- `--query-lane <query>` (repeatable, at most three) — explicit semantic query
+  formulations. If absent, form the lanes in Step 1 and pass them through the
+  tool's `query_lanes` parameter. Literature sources search every lane; artifact
+  sources (Context7, GitHub, and Hugging Face) search only the primary lane.
 - `--exploratory` — cross-domain mode: the user is hunting structural
   analogies in *other* fields, so low topic overlap is expected (reported as
   `LOW-OVERLAP`, not a retry demand) and the digest adds a `### Field map`
-  of which OpenAlex subfields the query spans.
+  of which OpenAlex subfields the primary query lane spans.
 
 Strip the flags from the topic text. If the topic (after removing flags) is
 empty, ask the user what they want researched.
 
-## Step 1 — Form the query
+## Step 1 — Form the query lanes
 
-**Short *and distinctive*; short is not the same as generic.** Anchor it in
-**two or more domain-specific terms** (the field *plus* the specific
-method/concept) so it can only match the intended domain. A bare common token —
-`data`, `model`, `network`, `signal` — or a word that doubles as an author
-surname (`Sun`, `Li`) collides and returns **confident-looking noise** (author
-names, generic "A Survey of …" titles); the tool refuses the most generic
-queries outright. Example: ❌ `data` / `alternative data` →
-✓ `alternative data equity return prediction`. Don't hand-tune per backend —
-the tool shapes each source's query and strips arXiv's boolean operators for
-you. Not a full paragraph either.
+Form two or three genuinely different semantic lanes; do not generate them by
+merely deleting words from one long query:
+
+1. Domain plus method or construct.
+2. Failure mode, validity question, or limitation.
+3. Standard, guideline, review, or canonical terminology when applicable.
+
+Each lane must be **short and distinctive; short is not the same as generic**.
+Anchor it in **two or more domain-specific terms** (the field plus the specific
+method or concept). A bare common token — `data`, `model`, `network`, `signal`
+— or a word that doubles as an author surname (`Sun`, `Li`) collides and returns
+confident-looking noise. The tool refuses the most generic lanes outright.
+Example for execution provenance:
+
+- `computational experiment provenance reproducibility artifacts`
+- `exploratory research raw data traceability`
+- `minimum information experimental reporting provenance`
+
+Mechanical shortening is only the first repair for one colliding lane. If that
+shortening also collides, use a **semantic re-anchor** with different domain
+terminology; repeatedly deleting words often makes the collision worse.
 
 ## Step 2 — Call the tool
 
@@ -46,25 +66,45 @@ Call `mcp__plugin_code-quorum_quorum__q_research` in Claude Code or
 - `topic`: the topic text
 - `sources`: the list from `--source`, only if the user restricted it
 - `limit`: the `--limit` value, only if given
+- `purpose`: `"methods"` by default or `"currency"` when requested
+- `query_lanes`: the two or three query strings from Step 1
 - `mode`: `"exploratory"` only under `--exploratory` (default is grounded)
 
 No-MCP fallback (headless, another agent, plugin not loaded): from a
 code-quorum checkout,
-`uv run quorum research "<topic>" [-s <source>]... [--limit <n>]` — same
-engine, grounded mode only (the CLI has no exploratory flag; an
-`--exploratory` pull needs the MCP tool).
+`uv run quorum research "<topic>" [-s <source>]... [--purpose <purpose>]
+[--query-lane <query>]... [--limit <n>]` — same engine, grounded mode only (the
+CLI has no exploratory flag; an `--exploratory` pull needs the MCP tool).
 
 ## Step 3 — Act on the `Research status:` line before anything else
 
-The digest **opens** with a deterministic quality verdict:
+The digest opens with a combined deterministic quality verdict, followed by a
+`### Source/lane status` table. The table is authoritative for diagnosis; one
+good source must not hide a collision elsewhere, and one noisy source must not
+sink a good lane. Each row is one of:
 
-- `OK` — results look on-topic; proceed. The overlap check needs at least 3
-  paper hits to fire — with fewer (a small `--limit`, a thin topic), `OK`
-  only means nothing errored, so eyeball the returned titles for relevance
-  yourself before treating them as grounding.
+- `ON-TOPIC` — enough candidates share the lane vocabulary.
+- `THIN` — fewer than three candidates; too little evidence to grade relevance.
+- `QUERY-COLLISION` — enough candidates returned, but they do not match the
+  lane. Try one labelled mechanical shortening; if it still collides, use a
+  semantic re-anchor with different terminology.
+- `SOURCE-MISMATCH` — this source returned nothing while a peer source found
+  on-topic work for the same lane; do not force that source to fit the domain.
+- `INFRASTRUCTURE` — the source failed after its bounded retry; retry the same
+  lane because changing terms cannot repair an outage.
+- `CONFIG` — a credential or access problem; changing the query cannot fix it.
+
+The combined `Research status:` line summarizes those rows:
+
+- `OK` — at least one source/lane is on-topic and no configuration problem
+  needs priority; read every non-OK status row before proceeding. Infrastructure
+  failures remain visible in the summary and table even when a peer paper source
+  supplied usable evidence.
 - `RETRY-RECOMMENDED` — the query whiffed or collided with unrelated work. It
-  **usually** carries a suggested shorter query (`· try: "…"`) — resubmit that
-  verbatim before concluding "no prior art". When the suggestion is **absent**,
+  **usually** carries one explicitly labelled mechanical shortening (`· try: "…"`) —
+  resubmit it once before concluding "no prior art". If that result still
+  reports `QUERY-COLLISION`, perform a semantic re-anchor instead of shortening
+  again. When the suggestion is **absent**,
   the detail text after the dash names the move, and the two cases need
   opposite ones: a **backend/infrastructure failure** says *retry* — resubmit
   the **same** query (changing terms cannot fix an outage); an
@@ -82,20 +122,20 @@ The digest **opens** with a deterministic quality verdict:
 Mechanically-fixable failures (an arXiv 400, its 200-with-`Rate exceeded`
 rate refusal, a transient flake) are **already retried inside the tool** — a
 `↻` note marks a source that was repaired, not
-hidden. A **domain-legitimate 0** in the per-source footer (Europe PMC on a
-non-biology topic, GitHub/HuggingFace on a non-software one, Context7 with no
-matching library) is a real answer, not a whiff to rework.
+hidden. A `SOURCE-MISMATCH` row is a real answer, not a whiff to rework.
 
 ## Step 4 — Present
 
-- Open with the `Research status:` line quoted, plus one line on per-source
-  signal strength — so a domain-legitimate whiff is never mistaken for missing
-  prior art, and noise is never mistaken for confirmed grounding.
+- Open with the `Research status:` line quoted, then summarize every non-OK row
+  from `### Source/lane status` so partial failures cannot be hidden.
 - Then the findings, keeping the digest's links: papers (title, year, source,
   URL), then docs/repos/models if queried. Don't pad — the digest is already
   ranked and deduped.
-- Europe PMC hits labelled by preprint server ("bioRxiv", "Research Square")
-  are **not peer-reviewed** — say so wherever one carries weight.
+- Europe PMC preprint hits labelled by server ("bioRxiv", "Research Square")
+  are **not peer-reviewed** — say so wherever one carries weight. Published-lane
+  hits expose full-text availability and may include MeSH metadata. Exact
+  published matches have priority; `[strata: synonym-expanded]` identifies a
+  candidate used only to backfill a thin exact result set.
 - Before stating what any hit *says*, apply **Verify cited evidence** (below).
 
 ## Verify cited evidence

@@ -13,7 +13,8 @@ from quorum.research import (
     fetch_context7,
     research_topic,
     search_arxiv,
-    search_europepmc,
+    search_europepmc_preprints,
+    search_europepmc_published,
     search_github,
     search_huggingface,
     search_openalex,
@@ -70,7 +71,7 @@ async def test_europepmc_live():
     backend answered. Schema drift in the publisher field would slip past a
     bare `assert papers`."""
     async with httpx.AsyncClient() as client:
-        papers = await search_europepmc(
+        papers = await search_europepmc_preprints(
             client, "single-cell RNA-seq batch correction", limit=5, timeout=20.0
         )
     assert papers
@@ -82,12 +83,29 @@ async def test_europepmc_live():
     assert not any("<h4>" in p.abstract or "<sup>" in p.abstract for p in papers)
 
 
+async def test_europepmc_published_live():
+    async with httpx.AsyncClient() as client:
+        papers = await search_europepmc_published(
+            client,
+            "computational reproducibility bioinformatics",
+            limit=5,
+            timeout=20.0,
+            expand_synonyms=True,
+        )
+    assert papers
+    assert all(p.title and p.research_source == "europepmc-published" for p in papers)
+    assert all(p.source not in ("bioRxiv", "medRxiv") for p in papers)
+    assert any(p.full_text_available is not None for p in papers)
+
+
 async def test_europepmc_live_returns_nothing_for_a_blank_topic():
     """A blank query matches Europe PMC's entire corpus (~1.2M hits, HTTP 200).
     Guard that we refuse it rather than dressing arbitrary popular papers as
     prior art."""
     async with httpx.AsyncClient() as client:
-        assert await search_europepmc(client, "  ", limit=5, timeout=20.0) == []
+        assert (
+            await search_europepmc_preprints(client, "  ", limit=5, timeout=20.0) == []
+        )
 
 
 async def test_context7_live():
@@ -207,7 +225,8 @@ async def test_research_topic_live_aggregates():
     assert counted | errored >= {
         "arxiv",
         "openalex",
-        "europepmc",
+        "europepmc-published",
+        "europepmc-preprints",
         "context7",
         "github",
         "huggingface",

@@ -1,13 +1,12 @@
-"""Prior-art research for grounded brainstorming. Queries arXiv + OpenAlex +
-Europe PMC (papers), Context7 (library docs), GitHub (repos), and HuggingFace
+"""Prior-art research for grounded brainstorming. Queries arXiv, OpenAlex,
+Europe PMC published/preprints, Context7 (library docs), GitHub (repos), and HuggingFace
 (models) over HTTP and returns a bounded digest. Standalone -- no council
 coupling. Mirrors the agent runtime's ethos: async, per-call timeouts, failures
 surfaced into the digest rather than swallowed or allowed to sink peer sources.
 
-Europe PMC carries the life-sciences preprint tier (bioRxiv, medRxiv, Research
-Square) that arXiv does not serve. It is reached through Europe PMC rather than
-bioRxiv's own API because that API cannot search: it serves date-range and DOI
-lookups and silently ignores a search parameter."""
+Europe PMC is split into a published lane (full-corpus metadata, MeSH, and
+full-text availability) and a preprint lane (bioRxiv, medRxiv, Research Square,
+excluding arXiv)."""
 
 from __future__ import annotations
 
@@ -18,24 +17,30 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass
-from typing import TypeVar
+from dataclasses import dataclass, replace
+from typing import TypeVar, cast
 from xml.etree import ElementTree as ET
 
 import httpx
 
 DEFAULT_LIMIT = 5
+_MAX_LIMIT = 20
+RESEARCH_PURPOSES = ("methods", "currency")
+_BOOLEAN_OPS = frozenset({"OR", "AND", "NOT"})
 # Sources whose results land in digest.papers. Kept as one constant because the
 # renderer's duplicate-drop arithmetic must agree with research_topic's routing:
 # a paper source missing from here silently under-reports dropped duplicates.
-_PAPER_SOURCES = frozenset({"arxiv", "openalex", "europepmc"})
+_PAPER_SOURCES = frozenset(
+    {"arxiv", "openalex", "europepmc-published", "europepmc-preprints"}
+)
 _ABSTRACT_MAX_CHARS = 240
 _MAX_SNIPPETS = 3
 # Display labels for the per-source count footer (whiff visibility).
 _SOURCE_LABELS = {
     "arxiv": "arXiv",
     "openalex": "OpenAlex",
-    "europepmc": "Europe PMC",
+    "europepmc-published": "Europe PMC published",
+    "europepmc-preprints": "Europe PMC preprints",
     "context7": "Context7",
     "github": "GitHub",
     "huggingface": "HuggingFace",
@@ -48,9 +53,9 @@ class Paper:
     title: str
     authors: tuple[str, ...]
     year: int | None
-    # The venue the record came from: "arxiv", "openalex", or -- for Europe PMC
-    # hits -- the preprint server itself ("bioRxiv", "medRxiv", ...), because
-    # "this is an un-peer-reviewed preprint" is what a reader must weigh it by.
+    # Human-facing venue: arxiv/openalex, a published journal, or the preprint
+    # server itself (bioRxiv, medRxiv, ...). Backend identity is kept separately
+    # in `research_source` for per-source status reporting.
     source: str
     identifier: str  # arXiv id or DOI
     url: str
@@ -58,6 +63,15 @@ class Paper:
     # OpenAlex subfield (from primary_topic), e.g. "Geophysics" -- the skystorm
     # field annotation. None for sources without a taxonomy (arXiv, Europe PMC).
     field: str | None = None
+    # Backend identity is distinct from the human-facing venue in `source`.
+    # Europe PMC preprints display their server (bioRxiv, medRxiv, ...), while
+    # status reporting still needs to attribute the hit to its explicit lane.
+    research_source: str = ""
+    full_text_available: bool | None = None
+    full_text_url: str = ""
+    mesh_terms: tuple[str, ...] = ()
+    strata: tuple[str, ...] = ()
+    query_lanes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -95,6 +109,16 @@ class HFModel:
 
 
 @dataclass(frozen=True)
+class SourceLaneStatus:
+    source: str
+    lane: str
+    query: str
+    code: str
+    detail: str
+    count: int
+
+
+@dataclass(frozen=True)
 class ResearchDigest:
     topic: str
     papers: tuple[Paper, ...]
@@ -102,8 +126,8 @@ class ResearchDigest:
     errors: tuple[str, ...] = ()
     repos: tuple[Repo, ...] = ()
     models: tuple[HFModel, ...] = ()
-    # (source, n_results_returned) per queried, non-errored source -- pre-dedup
-    # for papers, so a 0 surfaces a whiffed query the consumer should rework.
+    # (source, n_results_retained) per queried, non-errored source after the
+    # per-source cap. A 0 surfaces a whiffed query the consumer should rework.
     counts: tuple[tuple[str, int], ...] = ()
     # One line per source that succeeded only after an in-tool auto-retry (arXiv
     # 400 reworked to a shorter query, or a transient failure re-tried) -- so a
@@ -113,6 +137,10 @@ class ResearchDigest:
     # showing which fields the query spans. Populated only when map_fields=True
     # (exploratory/skystorm); empty otherwise.
     field_map: tuple[tuple[str, int], ...] = ()
+    # One deterministic quality row per source/query-lane attempt. Empty on
+    # legacy/manual digests, whose combined status still uses the aggregate
+    # fallback in `compute_status`.
+    source_statuses: tuple[SourceLaneStatus, ...] = ()
 
 
 def _truncate(text: str, limit: int = _ABSTRACT_MAX_CHARS) -> str:
@@ -141,7 +169,7 @@ def _clean_token(token: str | None) -> str | None:
 def _redact(text: str, secrets: Iterable[str]) -> str:
     """Replace any secret value with <redacted> -- a backstop so a token can
     never surface in a rendered digest, whatever error path produced the text."""
-    for secret in secrets:
+    for secret in sorted(secrets, key=len, reverse=True):
         if secret:
             text = text.replace(secret, "<redacted>")
     return text
@@ -307,10 +335,27 @@ def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
     status = compute_status(digest, mode=mode)
     status_line = f"Research status: {status.code} — {status.detail}"
     if status.suggested_query:
-        status_line += f' · try: "{status.suggested_query}"'
+        lane = f" {status.suggested_lane}" if status.suggested_lane else ""
+        status_line += f' · try{lane}: "{status.suggested_query}"'
     lines: list[str] = [status_line, "", f"## Prior art for: {digest.topic}", ""]
+    if digest.source_statuses:
+        lines.extend(
+            (
+                "### Source/lane status",
+                "| Source | Lane | Status | Candidates | Query | Detail |",
+                "|---|---|---|---:|---|---|",
+            )
+        )
+        for row in digest.source_statuses:
+            query = row.query.replace("|", "\\|")
+            detail = row.detail.replace("|", "\\|")
+            lines.append(
+                f"| {_SOURCE_LABELS.get(row.source, row.source)} | {row.lane} | "
+                f"{row.code} | {row.count} | {query} | {detail} |"
+            )
+        lines.append("")
     if digest.papers:
-        lines.append("### Papers (arXiv + OpenAlex + Europe PMC preprints)")
+        lines.append("### Papers (arXiv + OpenAlex + Europe PMC published/preprints)")
         for p in digest.papers:
             who = ", ".join(p.authors[:3]) or "unknown"
             yr = p.year if p.year is not None else "n.d."
@@ -318,9 +363,26 @@ def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
             # Field annotation is skystorm signal (which field the hit sits in,
             # for the harvest/pivot judgment); kept out of the grounded render.
             tag = f" [field: {p.field}]" if mode == "exploratory" and p.field else ""
+            strata = f" [strata: {', '.join(p.strata)}]" if p.strata else ""
+            source = (
+                f" [source: {_SOURCE_LABELS.get(p.research_source, p.research_source)}]"
+                if p.research_source and p.research_source != p.source
+                else ""
+            )
+            lanes = f" [lanes: {', '.join(p.query_lanes)}]" if p.query_lanes else ""
+            if p.full_text_available is True:
+                full_text = (
+                    f" [full text] <{p.full_text_url}>"
+                    if p.full_text_url
+                    else " [full text available]"
+                )
+            elif p.full_text_available is False:
+                full_text = " [no open full text identified by Europe PMC]"
+            else:
+                full_text = ""
             lines.append(
-                f"- **{p.title}** ({yr}, {p.source}){tag} — {who}. "
-                f"{_truncate(p.abstract)}{link}"
+                f"- **{p.title}** ({yr}, {p.source}){tag}{strata}{source}{lanes}"
+                f"{full_text} — {who}. {_truncate(p.abstract)}{link}"
             )
         lines.append("")
     if digest.libraries:
@@ -409,6 +471,7 @@ _ARXIV_URL = "https://export.arxiv.org/api/query"
 # arXiv's published etiquette is one query every ~3 seconds; a rate refusal
 # retried sooner just re-hits the wall (tests patch this to 0).
 _RATE_PAUSE_S = 3.0
+_MAX_RATE_WAIT_S = 15.0
 # Monotonic time before which no rate-classed retry may fire. Concurrent
 # refusals must not sleep the same fixed pause and wake in lockstep, which
 # would recreate the burst that triggered the refusal. Each retry claims the
@@ -417,14 +480,15 @@ _RATE_PAUSE_S = 3.0
 _rate_next_free = 0.0
 
 
-def _claim_rate_slot(now: float) -> float:
-    """Return the monotonic time this rate-classed retry may fire, and push
-    the next caller's slot one polite gap further out. Atomic on the event
-    loop (no await between read and write), and pure bookkeeping so the
-    serialization is testable without sleeping; the caller sleeps until the
-    returned time."""
+def _claim_rate_slot(now: float) -> float | None:
+    """Return when this rate retry may fire, or None when the bounded queue is
+    full. Successful claims push the next slot one polite gap further out.
+    Atomic on the event loop (no await between read and write), and pure
+    bookkeeping so serialization is testable without sleeping."""
     global _rate_next_free
     fire_at = max(now + _RATE_PAUSE_S, _rate_next_free)
+    if fire_at > now + _MAX_RATE_WAIT_S:
+        return None
     _rate_next_free = fire_at + _RATE_PAUSE_S
     return fire_at
 
@@ -486,6 +550,7 @@ async def search_arxiv(
                 identifier=arxiv_id,
                 url=raw_id,
                 abstract=summary,
+                research_source="arxiv",
             )
         )
     return papers
@@ -659,6 +724,7 @@ async def search_openalex(
     timeout: float,
     email: str | None,
     api_key: str | None = None,
+    purpose: str = "methods",
 ) -> list[Paper]:
     """Search OpenAlex works. `api_key` is required for normal use. OpenAlex
     permits only a small anonymous demo allowance before returning 409, and it
@@ -669,58 +735,104 @@ async def search_openalex(
     httpx embeds the full URL in its HTTPStatusError text, so a key in the query
     string would land verbatim in digest.errors -- which is rendered into the
     digest and handed to the council's third-party LLMs. Same rule as GH/HF."""
+    if purpose not in RESEARCH_PURPOSES:
+        raise ValueError(
+            f"Unknown research purpose {purpose!r}; expected one of "
+            f"{', '.join(RESEARCH_PURPOSES)}."
+        )
     from_date = (datetime.date.today() - datetime.timedelta(days=365 * 5)).isoformat()
     headers = {"User-Agent": f"code-quorum (mailto:{email})"} if email else {}
     api_key = _clean_token(api_key)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    resp = await client.get(
-        _OPENALEX_URL,
-        params={
+
+    async def search_stratum(name: str, *, recent: bool) -> list[Paper]:
+        params = {
             "search": query,
             "per-page": limit,
-            "filter": f"from_publication_date:{from_date}",
+            "sort": "relevance_score:desc",
             "select": (
                 "title,publication_year,doi,authorships,"
                 "abstract_inverted_index,primary_topic"
             ),
-        },
-        headers=headers,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    papers: list[Paper] = []
-    for work in resp.json().get("results", []):
-        title = (work.get("title") or "").strip()
-        if not title:
-            continue
-        doi = work.get("doi") or ""
-        authors = tuple(
-            name
-            for a in work.get("authorships", [])
-            if (name := ((a.get("author") or {}).get("display_name") or "").strip())
+        }
+        if recent:
+            params["filter"] = f"from_publication_date:{from_date}"
+        resp = await client.get(
+            _OPENALEX_URL,
+            params=params,
+            headers=headers,
+            timeout=timeout,
         )
-        abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
-        subfield = ((work.get("primary_topic") or {}).get("subfield") or {}).get(
-            "display_name"
-        ) or None
-        arxiv_id = _arxiv_id_from_doi(doi)
-        url = (
-            doi if doi.startswith("http") else (f"https://doi.org/{doi}" if doi else "")
-        )
-        papers.append(
-            Paper(
-                title=title,
-                authors=authors,
-                year=work.get("publication_year"),
-                source="openalex",
-                identifier=arxiv_id or doi,
-                url=url,
-                abstract=abstract,
-                field=subfield,
+        resp.raise_for_status()
+        papers: list[Paper] = []
+        for work in resp.json().get("results", []):
+            title = (work.get("title") or "").strip()
+            if not title:
+                continue
+            doi = work.get("doi") or ""
+            authors = tuple(
+                author_name
+                for authorship in work.get("authorships", [])
+                if (
+                    author_name := (
+                        (authorship.get("author") or {}).get("display_name") or ""
+                    ).strip()
+                )
             )
-        )
-    return papers
+            abstract = _reconstruct_abstract(work.get("abstract_inverted_index"))
+            subfield = ((work.get("primary_topic") or {}).get("subfield") or {}).get(
+                "display_name"
+            ) or None
+            arxiv_id = _arxiv_id_from_doi(doi)
+            url = (
+                doi
+                if doi.startswith("http")
+                else (f"https://doi.org/{doi}" if doi else "")
+            )
+            papers.append(
+                Paper(
+                    title=title,
+                    authors=authors,
+                    year=work.get("publication_year"),
+                    source="openalex",
+                    identifier=arxiv_id or doi,
+                    url=url,
+                    abstract=abstract,
+                    field=subfield,
+                    research_source="openalex",
+                    strata=(name,),
+                )
+            )
+        return papers
+
+    if purpose == "currency":
+        return await search_stratum("recent", recent=True)
+
+    all_time, recent = await asyncio.gather(
+        search_stratum("all-time", recent=False),
+        search_stratum("recent", recent=True),
+    )
+    merged: dict[str, Paper] = {}
+    order: list[str] = []
+    for index in range(max(len(all_time), len(recent))):
+        for papers in (all_time, recent):
+            if index >= len(papers):
+                continue
+            paper = papers[index]
+            key = _normalize_identifier(paper.identifier) or "".join(
+                char for char in paper.title.lower() if char.isalnum()
+            )
+            if key in merged:
+                existing = merged[key]
+                merged[key] = replace(
+                    existing,
+                    strata=tuple(dict.fromkeys(existing.strata + paper.strata)),
+                )
+                continue
+            merged[key] = paper
+            order.append(key)
+    return [merged[key] for key in order[:limit]]
 
 
 _EUROPEPMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
@@ -730,6 +842,7 @@ _EUROPEPMC_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 # arXiv preprints, which the `arxiv` source already returns. What is left is the
 # tier nothing else in the panel reaches: bioRxiv, medRxiv, Research Square.
 _EUROPEPMC_FILTER = 'SRC:PPR NOT PUBLISHER:"arXiv"'
+_EUROPEPMC_PUBLISHED_FILTER = "NOT SRC:PPR"
 # Anchored on a tag NAME (a letter or a closing slash right after the '<'). A bare
 # `<[^>]+>` also matches an inequality span -- "p < 0.05 ... > 2-fold" -- and eats
 # the text between them, which does not merely truncate the abstract: it fabricates
@@ -737,7 +850,7 @@ _EUROPEPMC_FILTER = 'SRC:PPR NOT PUBLISHER:"arXiv"'
 # Biology abstracts are dense with such spans (measured: 7/50 on an ordinary query).
 _TAG_RE = re.compile(r"</?[A-Za-z][^>]*>")
 # Metacharacters that let a topic restructure the boolean tree we build below.
-_EUROPEPMC_META = str.maketrans({"(": " ", ")": " ", '"': " "})
+_EUROPEPMC_META = str.maketrans({"(": " ", ")": " ", '"': " ", ":": " "})
 
 
 def _strip_html(text: str) -> str:
@@ -747,7 +860,152 @@ def _strip_html(text: str) -> str:
     return " ".join(_TAG_RE.sub(" ", text).split())
 
 
-async def search_europepmc(
+def _europepmc_safe_query(query: str) -> str:
+    """Remove syntax that could restructure the Europe PMC boolean group."""
+    translated = query.translate(_EUROPEPMC_META).split()
+    return " ".join(token for token in translated if token.upper() not in _BOOLEAN_OPS)
+
+
+def _safe_http_url(value: str) -> str:
+    """Return a prompt-safe absolute HTTP(S) URL, or an empty string."""
+    value = value.strip()
+    if not value.startswith(("http://", "https://")):
+        return ""
+    if any(char.isspace() or char in "()<>" for char in value):
+        return ""
+    return value
+
+
+def _parse_europepmc_published_item(item: dict) -> Paper | None:
+    title = (item.get("title") or "").strip()
+    if not title:
+        return None
+    doi = (item.get("doi") or "").strip()
+    source_id = (item.get("source") or "").strip()
+    ext_id = (item.get("extId") or item.get("id") or "").strip()
+    authors = tuple(
+        name
+        for author in ((item.get("authorList") or {}).get("author") or [])
+        if (name := (author.get("fullName") or "").strip())
+    )
+    year = item.get("pubYear")
+    year_value = int(str(year)) if year is not None and str(year).isdigit() else None
+    full_text_rows = (item.get("fullTextUrlList") or {}).get("fullTextUrl") or []
+    full_text_url = next(
+        (
+            url
+            for row in full_text_rows
+            if (url := _safe_http_url(row.get("url") or ""))
+            and (
+                (row.get("availabilityCode") or "").upper() in {"OA", "F"}
+                or (row.get("availability") or "").lower() in {"open access", "free"}
+            )
+        ),
+        "",
+    )
+    access_flags = [
+        item.get(field) for field in ("isOpenAccess", "inEPMC") if field in item
+    ]
+    availability_rows = [
+        row.get("availabilityCode") or row.get("availability")
+        for row in full_text_rows
+        if row.get("availabilityCode") or row.get("availability")
+    ]
+    if full_text_url or any(flag == "Y" for flag in access_flags):
+        full_text_available: bool | None = True
+    elif access_flags or availability_rows:
+        full_text_available = False
+    else:
+        full_text_available = None
+    mesh_terms = tuple(
+        term
+        for row in ((item.get("meshHeadingList") or {}).get("meshHeading") or [])
+        if (term := (row.get("descriptorName") or "").strip())
+    )
+    if doi:
+        url = doi if doi.startswith("http") else f"https://doi.org/{doi}"
+    elif source_id and ext_id:
+        url = f"https://europepmc.org/article/{source_id}/{ext_id}"
+    else:
+        url = full_text_url
+    return Paper(
+        title=title,
+        authors=authors,
+        year=year_value,
+        source=(item.get("journalTitle") or "Europe PMC").strip(),
+        identifier=doi or ext_id,
+        abstract=_strip_html(item.get("abstractText") or ""),
+        url=url,
+        research_source="europepmc-published",
+        full_text_available=full_text_available,
+        full_text_url=full_text_url,
+        mesh_terms=mesh_terms,
+    )
+
+
+async def search_europepmc_published(
+    client: httpx.AsyncClient,
+    query: str,
+    *,
+    limit: int,
+    timeout: float,
+    expand_synonyms: bool = False,
+) -> list[Paper]:
+    """Search Europe PMC's published literature lane.
+
+    The lane excludes preprints but otherwise uses the full Europe PMC corpus.
+    `core` results carry abstracts, MeSH headings, and full-text availability.
+    When requested, synonym expansion only backfills an exact search that did
+    not fill the result limit. Exact candidates keep priority; expansion-only
+    candidates are labelled so lexical status scoring does not mistake changed
+    vocabulary for a query collision.
+    """
+    if not query.strip():
+        return []
+    safe_query = _europepmc_safe_query(query)
+    if not safe_query:
+        return []
+
+    async def fetch(*, synonyms: bool) -> list[Paper]:
+        resp = await client.get(
+            _EUROPEPMC_URL,
+            params={
+                "query": f"({safe_query}) {_EUROPEPMC_PUBLISHED_FILTER}",
+                "format": "json",
+                "pageSize": limit * 2 if synonyms else limit,
+                "resultType": "core",
+                "synonym": str(synonyms).lower(),
+            },
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        result = (resp.json().get("resultList") or {}).get("result") or []
+        return [
+            paper
+            for item in result
+            if (paper := _parse_europepmc_published_item(item)) is not None
+        ]
+
+    papers = _dedup_papers(await fetch(synonyms=False))[:limit]
+    if not expand_synonyms or len(papers) >= limit:
+        return papers
+    for paper in await fetch(synonyms=True):
+        deduped = _dedup_papers([*papers, paper])
+        if len(deduped) == len(papers):
+            papers = deduped
+            continue
+        papers.append(
+            replace(
+                paper,
+                strata=tuple(dict.fromkeys(paper.strata + ("synonym-expanded",))),
+            )
+        )
+        if len(papers) >= limit:
+            break
+    return papers
+
+
+async def search_europepmc_preprints(
     client: httpx.AsyncClient, query: str, *, limit: int, timeout: float
 ) -> list[Paper]:
     """Search the bioRxiv/medRxiv preprint tier via Europe PMC.
@@ -771,7 +1029,9 @@ async def search_europepmc(
     depend on it, and parenthesize the pin as its own group."""
     if not query.strip():
         return []
-    safe_query = " ".join(query.translate(_EUROPEPMC_META).split())
+    safe_query = _europepmc_safe_query(query)
+    if not safe_query:
+        return []
     resp = await client.get(
         _EUROPEPMC_URL,
         params={
@@ -802,7 +1062,7 @@ async def search_europepmc(
         publisher = (
             (item.get("bookOrReportDetails") or {}).get("publisher")
             or item.get("publisher")
-            or "europepmc"
+            or "europepmc-preprints"
         ).strip()
         # Prefer the DOI: it resolves to the preprint's own page. Fall back to the
         # Europe PMC record when a preprint has not been assigned one yet.
@@ -821,13 +1081,13 @@ async def search_europepmc(
                 identifier=doi or pmc_id,
                 abstract=_strip_html(item.get("abstractText") or ""),
                 url=url,
+                research_source="europepmc-preprints",
             )
         )
     return papers
 
 
 _MAX_DISTINCTIVE_TERMS = 4
-_BOOLEAN_OPS = frozenset({"OR", "AND", "NOT"})
 # Punctuation stripped only from a token's EDGES (wrapping quotes/parens/commas,
 # trailing ?/!, markdown backticks/asterisks from a pasted prompt); internal
 # separators (the - . / _ in IP-Adapter, FLUX.2) are what make a term distinctive,
@@ -1087,6 +1347,8 @@ async def search_github(
 
 
 def _hf_parse(item: dict, broadened: bool) -> tuple[str, HFModel] | None:
+    if not isinstance(item, dict):
+        return None
     # Exclude private models: an authenticated token can read the user's own
     # private models, whose id/metadata would otherwise leak into the digest
     # (and on to the council's third-party LLMs). Prior-art research wants
@@ -1330,6 +1592,32 @@ def _scoreable_texts(papers: "Iterable[Paper]", query: str) -> list[str]:
     return out
 
 
+def _scoreable_artifact_texts(
+    items: Iterable[LibraryDoc | Repo], query: str
+) -> list[str]:
+    """Keep artifact metadata that can support a lexical verdict.
+
+    Descriptions and documentation snippets provide enough context to score.
+    A bare name is retained only when the name itself already clears the query
+    coverage bar; otherwise missing metadata degrades to THIN, not collision.
+    """
+    terms = set(_scorable_terms(query))
+    required = _required_matches(len(terms)) if terms else 0
+    texts: list[str] = []
+    for item in items:
+        if isinstance(item, LibraryDoc):
+            supporting = " ".join((item.description, *item.snippets)).strip()
+            name = item.name
+        else:
+            supporting = item.description.strip()
+            name = item.name
+        if supporting:
+            texts.append(f"{name} {supporting}")
+        elif terms and len(_match_tokens(name) & terms) >= required:
+            texts.append(name)
+    return texts
+
+
 @dataclass(frozen=True)
 class ResearchStatus:
     """The deterministic quality verdict rendered as the digest's first line.
@@ -1340,6 +1628,103 @@ class ResearchStatus:
     code: str
     detail: str
     suggested_query: str = ""
+    suggested_lane: str = ""
+
+
+def _source_lane_status(
+    source: str,
+    lane: str,
+    query: str,
+    value: list,
+    error: str | None,
+) -> SourceLaneStatus:
+    """Classify one source/query-lane attempt without consulting peer sources."""
+    if error is not None:
+        error_class = _error_class(error)
+        if error_class == "config":
+            code = "CONFIG"
+            detail = "credential or source configuration rejected the request"
+        elif error_class == "query":
+            code = "QUERY-COLLISION"
+            detail = "mechanical shortening failed; use a semantic re-anchor"
+        else:
+            code = "INFRASTRUCTURE"
+            detail = "source failed after its bounded retry"
+        return SourceLaneStatus(source, lane, query, code, detail, 0)
+
+    count = len(value)
+    if count < _MIN_SCORING_HITS:
+        return SourceLaneStatus(
+            source,
+            lane,
+            query,
+            "THIN",
+            f"only {count} candidate(s); too few for a relevance verdict",
+            count,
+        )
+    if value and isinstance(value[0], HFModel):
+        return SourceLaneStatus(
+            source,
+            lane,
+            query,
+            "THIN",
+            "model identifiers lack enough descriptive text for lexical grading",
+            count,
+        )
+    exact_papers: list[Paper] | None = None
+    if value and isinstance(value[0], Paper):
+        exact_papers = [
+            paper for paper in value if "synonym-expanded" not in paper.strata
+        ]
+        texts = _scoreable_texts(exact_papers, query)
+    elif value and isinstance(value[0], LibraryDoc):
+        texts = _scoreable_artifact_texts(value, query)
+    elif value and isinstance(value[0], Repo):
+        texts = _scoreable_artifact_texts(value, query)
+    else:
+        texts = []
+    if len(texts) < _MIN_SCORING_HITS:
+        if (
+            exact_papers is not None
+            and len(exact_papers) < len(value)
+            and len(exact_papers) < _MIN_SCORING_HITS
+        ):
+            detail = (
+                f"only {len(exact_papers)} exact-match candidate(s); the rest "
+                "are synonym-expanded"
+            )
+        else:
+            detail = f"only {len(texts)} candidate(s) carry scoreable text"
+        return SourceLaneStatus(
+            source,
+            lane,
+            query,
+            "THIN",
+            detail,
+            count,
+        )
+    fraction = _on_topic_fraction(texts, query)
+    if (
+        fraction is not None
+        and len(texts) >= _MIN_SCORING_HITS
+        and fraction < _ON_TOPIC_MIN
+    ):
+        return SourceLaneStatus(
+            source,
+            lane,
+            query,
+            "QUERY-COLLISION",
+            f"only {round(fraction * 100)}% of candidates share lane vocabulary",
+            count,
+        )
+    return SourceLaneStatus(
+        source,
+        lane,
+        query,
+        "ON-TOPIC",
+        "candidate vocabulary matches the query lane",
+        count,
+    )
 
 
 def _error_class(error: str) -> str:
@@ -1401,13 +1786,106 @@ def compute_status(
     query. Then a paper stratum that produced NO evidence -- whether every paper
     source errored or every one returned 0 -- is RETRY-RECOMMENDED,
     never OK. Then low lexical overlap. Otherwise OK. The zero-legitimacy cases
-    (Europe PMC 0 on non-biology, GitHub/HF 0 on non-software, Context7 0 on
-    no-library) never trip a retry: they are real answers, recognized by paper
-    sources still having hits."""
+    Source mismatches never trip a retry when a peer source found on-topic work;
+    they are explicit rows rather than hidden in the aggregate."""
     if mode not in ("grounded", "exploratory"):
         raise ValueError(
             f"Unknown research mode {mode!r}; expected 'grounded' or 'exploratory'."
         )
+    if digest.source_statuses:
+        counts: dict[str, int] = {}
+        for row in digest.source_statuses:
+            counts[row.code] = counts.get(row.code, 0) + 1
+        summary = ", ".join(
+            f"{count} {code.lower()}" for code, count in sorted(counts.items())
+        )
+        if counts.get("CONFIG"):
+            return ResearchStatus(
+                "CONFIG",
+                summary
+                + "; retry will not fix the rejected credential or access policy -- "
+                "set the source key or proceed on the other sources and say so",
+            )
+        paper_rows = [
+            row for row in digest.source_statuses if row.source in _PAPER_SOURCES
+        ]
+        if paper_rows and all(row.count == 0 for row in paper_rows):
+            if any(row.code == "INFRASTRUCTURE" for row in paper_rows):
+                return ResearchStatus(
+                    "RETRY-RECOMMENDED",
+                    summary
+                    + "; the paper stratum produced no evidence and at least one "
+                    "paper source failed -- retry the same lanes",
+                )
+            reworked, lane = next(
+                (
+                    (candidate, row.lane)
+                    for row in paper_rows
+                    if (candidate := _rework(row.query))
+                ),
+                ("", ""),
+            )
+            return ResearchStatus(
+                "RETRY-RECOMMENDED",
+                summary + "; the paper stratum produced no evidence",
+                reworked,
+                lane,
+            )
+        if counts.get("ON-TOPIC"):
+            return ResearchStatus("OK", summary)
+        collision = next(
+            (row for row in digest.source_statuses if row.code == "QUERY-COLLISION"),
+            None,
+        )
+        if collision is not None:
+            if mode == "exploratory":
+                return ResearchStatus(
+                    "LOW-OVERLAP",
+                    summary + "; acceptable for a deliberate cross-domain probe",
+                )
+            reworked = _rework(collision.query)
+            detail = (
+                summary
+                + "; "
+                + (
+                    "try the suggested mechanical shortening once; if it still "
+                    "collides, semantically re-anchor with different terminology"
+                    if reworked
+                    else "mechanical shortening is exhausted; semantically re-anchor "
+                    "with different domain terminology"
+                )
+            )
+            return ResearchStatus(
+                "RETRY-RECOMMENDED",
+                detail,
+                reworked,
+                collision.lane if reworked else "",
+            )
+        if counts.get("INFRASTRUCTURE"):
+            return ResearchStatus(
+                "RETRY-RECOMMENDED",
+                summary + "; retry the failed source/lane without changing terms",
+            )
+        if any(row.count > 0 for row in digest.source_statuses):
+            return ResearchStatus(
+                "OK",
+                summary + "; thin rows require manual relevance review",
+            )
+        reworked, lane = next(
+            (
+                (candidate, row.lane)
+                for row in digest.source_statuses
+                if (candidate := _rework(row.query))
+            ),
+            ("", ""),
+        )
+        return ResearchStatus(
+            "RETRY-RECOMMENDED",
+            summary + "; broaden or semantically re-anchor the thin lanes",
+            reworked,
+            lane,
+        )
+
     config = next((e for e in digest.errors if _error_class(e) == "config"), None)
     if config:
         return ResearchStatus(
@@ -1496,22 +1974,64 @@ def _normalize_identifier(identifier: str) -> str:
     return key
 
 
+_GENERIC_PAPER_VENUES = frozenset(
+    {"arxiv", "openalex", "Europe PMC", "europepmc-preprints"}
+)
+
+
 def _dedup_papers(papers: list[Paper]) -> list[Paper]:
-    """Drop duplicates across sources: same identifier (DOI-normalized), or same
-    alphanumeric-normalized title. Keeps the first (richer-source) record."""
-    seen_ids: set[str] = set()
-    seen_titles: set[str] = set()
+    """Deduplicate papers while preserving richer metadata from later sources."""
+    index_by_id: dict[str, int] = {}
+    index_by_title: dict[str, int] = {}
     out: list[Paper] = []
     for p in papers:
         key_id = _normalize_identifier(p.identifier)
         key_title = "".join(ch for ch in p.title.lower() if ch.isalnum())
-        if (key_id and key_id in seen_ids) or (key_title and key_title in seen_titles):
+        existing_index = index_by_id.get(key_id) if key_id else None
+        if existing_index is None and key_title:
+            existing_index = index_by_title.get(key_title)
+        if existing_index is not None:
+            existing = out[existing_index]
+            if existing.full_text_available is True or p.full_text_available is True:
+                full_text_available: bool | None = True
+            elif (
+                existing.full_text_available is False or p.full_text_available is False
+            ):
+                full_text_available = False
+            else:
+                full_text_available = None
+            out[existing_index] = replace(
+                existing,
+                identifier=existing.identifier or p.identifier,
+                authors=existing.authors or p.authors,
+                year=existing.year if existing.year is not None else p.year,
+                source=(
+                    p.source
+                    if existing.source in _GENERIC_PAPER_VENUES
+                    and p.source not in _GENERIC_PAPER_VENUES
+                    else existing.source
+                ),
+                url=existing.url or p.url,
+                abstract=existing.abstract or p.abstract,
+                field=existing.field or p.field,
+                research_source=existing.research_source or p.research_source,
+                full_text_available=full_text_available,
+                full_text_url=existing.full_text_url or p.full_text_url,
+                mesh_terms=tuple(dict.fromkeys(existing.mesh_terms + p.mesh_terms)),
+                strata=tuple(dict.fromkeys(existing.strata + p.strata)),
+                query_lanes=tuple(dict.fromkeys(existing.query_lanes + p.query_lanes)),
+            )
+            if key_id:
+                index_by_id[key_id] = existing_index
+            if key_title:
+                index_by_title[key_title] = existing_index
             continue
-        if key_id:
-            seen_ids.add(key_id)
-        if key_title:
-            seen_titles.add(key_title)
+        index = len(out)
         out.append(p)
+        if key_id:
+            index_by_id[key_id] = index
+        if key_title:
+            index_by_title[key_title] = index
     return out
 
 
@@ -1522,9 +2042,14 @@ def validate_sources(sources: Iterable[str]) -> set[str]:
     chosen = set(sources)
     unknown = chosen - set(DEFAULT_SOURCES)
     if unknown:
+        migration = (
+            " europepmc was split into europepmc-published and europepmc-preprints."
+            if "europepmc" in unknown
+            else ""
+        )
         raise ValueError(
             f"Unknown research source(s): {', '.join(sorted(unknown))}. "
-            f"Valid sources: {', '.join(DEFAULT_SOURCES)}."
+            f"Valid sources: {', '.join(DEFAULT_SOURCES)}.{migration}"
         )
     return chosen
 
@@ -1534,8 +2059,10 @@ async def _contained(name: str, factory, query: str):
     failure into an error string so a dead source never sinks its peers.
     `factory` builds the source coroutine from a query string, so the retry can
     resubmit a *reworked* query. Returns (name, value|None, error|None,
-    note|None); `note` is set only when a retry succeeded, so a repaired source
-    is visible. CancelledError (BaseException) propagates.
+    note|None, actual_query); `actual_query` is the query used by the final
+    attempt, so status scoring never grades shortened-query results against the
+    original longer lane. `note` is set only when a retry succeeded, so a
+    repaired source is visible. CancelledError (BaseException) propagates.
 
     The retry is deliberate, not a blanket loop -- the class of the first error
     decides (see `_error_class`):
@@ -1546,46 +2073,56 @@ async def _contained(name: str, factory, query: str):
     - 'rate' (arXiv's 200-with-'Rate exceeded' refusal, or a 429): resubmit
       ONCE with the SAME query after claiming the next polite slot -- an
       immediate retry just re-hits the wall, and concurrent refusals must not
-      wake in lockstep (see _claim_rate_slot).
+      wake in lockstep (see _claim_rate_slot). A saturated retry queue surfaces
+      the failure instead of accumulating unbounded wait debt.
     - 'transient' (timeout/flake): resubmit ONCE with the SAME query.
     - 'config' (rejected key / anonymous load-shed): NOT retried -- a retry
       cannot fix it; surface it so the verdict can label it CONFIG."""
     attempt_query = query
     try:
-        return name, await factory(attempt_query), None, None
+        return name, await factory(attempt_query), None, None, attempt_query
     except Exception as exc:  # noqa: BLE001 -- surface, don't sink peers
         err = f"{name}: {type(exc).__name__}: {exc}"
         cls = _error_class(err)
         if cls == "config":
-            return name, None, err, None
+            return name, None, err, None, attempt_query
         if cls == "query":
             reworked = _rework(query)
             if not reworked:
                 # Nothing left to rework -- `_rework` folds case and whitespace,
                 # so a case-/spacing-only 'shorter' query never triggers a
                 # wasted, semantically identical retry (round-3 review).
-                return name, None, err, None
+                return name, None, err, None, attempt_query
             attempt_query = reworked
         elif cls == "rate":
             fire_at = _claim_rate_slot(time.monotonic())
+            if fire_at is None:
+                return name, None, err, None, attempt_query
             await asyncio.sleep(max(0.0, fire_at - time.monotonic()))
         # 'transient' falls through with attempt_query == query
     try:
         value = await factory(attempt_query)
     except Exception as exc:  # noqa: BLE001 -- retry also failed; surface it
-        return name, None, f"{name}: {type(exc).__name__}: {exc}", None
+        return (
+            name,
+            None,
+            f"{name}: {type(exc).__name__}: {exc}",
+            None,
+            attempt_query,
+        )
     if attempt_query != query:
-        note = f'{name}: retried after auto-shortening query to "{attempt_query}"'
+        note = f'retried after auto-shortening query to "{attempt_query}"'
     elif cls == "rate":
-        note = f"{name}: retried after a rate-limit refusal cleared"
+        note = "retried after a rate-limit refusal cleared"
     else:
-        note = f"{name}: retried after a transient failure"
-    return name, value, None, note
+        note = "retried after a transient failure"
+    return name, value, None, note, attempt_query
 
 
 async def research_topic(
     topic: str,
     *,
+    query_lanes: tuple[str, ...] | list[str] | None = None,
     sources: set[str] | tuple[str, ...] = DEFAULT_SOURCES,
     limit: int = DEFAULT_LIMIT,
     timeout: float = 15.0,
@@ -1595,6 +2132,7 @@ async def research_topic(
     github_token: str | None = None,
     hf_token: str | None = None,
     map_fields: bool = False,
+    purpose: str = "methods",
     client: httpx.AsyncClient | None = None,
 ) -> ResearchDigest:
     """Query the selected sources concurrently and return a deduped digest. Each
@@ -1607,22 +2145,42 @@ async def research_topic(
     GitHub, and Hugging Face tokens are read from the environment when not
     passed. All provider tokens are sent only as Bearer headers."""
     sources = validate_sources(sources)
+    if purpose not in RESEARCH_PURPOSES:
+        raise ValueError(
+            f"Unknown research purpose {purpose!r}; expected one of "
+            f"{', '.join(RESEARCH_PURPOSES)}."
+        )
     if limit < 1:
         raise ValueError(f"limit must be >= 1, got {limit}.")
-    # Pre-flight lint (Layer 1): refuse a query with no distinctive terms -- empty
-    # or only generic/stopword tokens ('data', 'a survey of methods'). Such a
-    # query keyword-matches unrelated work on every backend and returns
-    # confident-looking noise; refusing up front (a tool that won't run) is far
-    # harder for the orchestrator to shrug off than a footnote it should have
-    # read. A single distinctive token ('nowcasting', 'FLUX.2') passes -- the
-    # verdict layer grades borderline queries, this only stops the unusable ones.
+    if limit > _MAX_LIMIT:
+        raise ValueError(f"limit must be <= {_MAX_LIMIT}, got {limit}.")
+    topic = " ".join(topic.split())
     if not _scorable_terms(topic):
         raise ValueError(
             f"Research topic {topic!r} has no distinctive terms to search on -- "
-            "it is empty or only generic/stopword tokens (e.g. 'data', 'model', "
-            "'a survey of methods'). Anchor it in 2+ domain-specific terms (the "
-            "field PLUS the specific method or concept) and call again."
+            "anchor it in 2+ domain-specific terms (the field PLUS the specific "
+            "method or concept) and call again."
         )
+    raw_lanes = tuple(query_lanes) if query_lanes is not None else (topic,)
+    if not raw_lanes or len(raw_lanes) > 3:
+        raise ValueError("query_lanes must contain between 1 and 3 queries.")
+    lanes: list[tuple[str, str]] = []
+    seen_lanes: set[str] = set()
+    for raw_query in raw_lanes:
+        query = " ".join(raw_query.split())
+        canonical = query.lower()
+        if not _scorable_terms(query):
+            raise ValueError(
+                f"Research query lane {raw_query!r} has no distinctive terms to "
+                "search on -- anchor it in 2+ domain-specific terms (the field "
+                "PLUS the specific method or concept) and call again."
+            )
+        if canonical in seen_lanes:
+            continue
+        seen_lanes.add(canonical)
+        lanes.append((f"lane-{len(lanes) + 1}", query))
+    if not lanes:
+        raise ValueError("query_lanes must contain at least one distinct query.")
     if email is None:
         email = os.environ.get("QUORUM_OPENALEX_EMAIL")
     if openalex_api_key is None:
@@ -1665,8 +2223,16 @@ async def research_topic(
             timeout=timeout,
             email=email,
             api_key=openalex_api_key,
+            purpose=purpose,
         ),
-        "europepmc": lambda q: search_europepmc(
+        "europepmc-published": lambda q: search_europepmc_published(
+            client,
+            q,
+            limit=limit,
+            timeout=timeout,
+            expand_synonyms=True,
+        ),
+        "europepmc-preprints": lambda q: search_europepmc_preprints(
             client, q, limit=limit, timeout=timeout
         ),
         # Context7's default timeout (10.0s) has always differed from the rest
@@ -1687,7 +2253,30 @@ async def research_topic(
         ),
     }
     factories = {name: fn for name, fn in all_factories.items() if name in sources}
-    jobs = [_contained(name, factory, topic) for name, factory in factories.items()]
+
+    async def run_lane(
+        lane: str, query: str, name: str, factory: Callable
+    ) -> tuple[str, str, str, list | None, str | None, str | None]:
+        source, value, error, note, actual_query = await _contained(
+            name, factory, query
+        )
+        return lane, actual_query, source, value, error, note
+
+    async def run_source(name: str, factory: Callable) -> list:
+        results: list = []
+        for lane_index, (lane, query) in enumerate(lanes):
+            if lane_index > 0 and name not in _PAPER_SOURCES:
+                break
+            if lane_index > 0 and name == "arxiv":
+                await asyncio.sleep(_RATE_PAUSE_S)
+            results.append(await run_lane(lane, query, name, factory))
+        return results
+
+    async def run_lanes() -> list:
+        by_source = await asyncio.gather(
+            *(run_source(name, factory) for name, factory in factories.items())
+        )
+        return [result for source_results in by_source for result in source_results]
 
     async def _safe_field_map() -> list[tuple[str, int]]:
         # Failure-isolated like every source: a group_by hiccup degrades the map
@@ -1696,7 +2285,7 @@ async def research_topic(
         try:
             return await map_openalex_fields(
                 client,
-                topic,
+                lanes[0][1],
                 timeout=timeout,
                 email=email,
                 api_key=openalex_api_key,
@@ -1707,11 +2296,9 @@ async def research_topic(
     want_map = map_fields and "openalex" in sources
     try:
         if want_map:
-            results, field_map = await asyncio.gather(
-                asyncio.gather(*jobs), _safe_field_map()
-            )
+            results, field_map = await asyncio.gather(run_lanes(), _safe_field_map())
         else:
-            results, field_map = await asyncio.gather(*jobs), []
+            results, field_map = await run_lanes(), []
     finally:
         if owns_client:
             await client.aclose()
@@ -1720,19 +2307,97 @@ async def research_topic(
     repos: list[Repo] = []
     models: list[HFModel] = []
     errors: list[str] = []
-    counts: list[tuple[str, int]] = []
+    count_by_source = {name: 0 for name in factories}
+    successful_sources: set[str] = set()
     notes: list[str] = []
-    # Non-paper sources route to their own bucket; everything else (arxiv,
-    # openalex, europepmc) falls through to `papers`.
-    buckets = {"context7": libraries, "github": repos, "huggingface": models}
-    for name, value, err, note in results:
+    source_statuses: list[SourceLaneStatus] = []
+    paper_groups: dict[str, list[tuple[str, list[Paper]]]] = {}
+    for lane, query, name, value, err, note in results:
         if note:
-            notes.append(_redact(note, secrets))
+            notes.append(_redact(f"{name} [{lane}]: {note}", secrets))
+        source_statuses.append(_source_lane_status(name, lane, query, value or [], err))
         if err is not None:
-            errors.append(_redact(err, secrets))
+            labelled = err.replace(f"{name}:", f"{name}: [{lane}]", 1)
+            errors.append(_redact(labelled, secrets))
             continue
-        counts.append((name, len(value)))
-        buckets.get(name, papers).extend(value)
+        if value is None:
+            continue
+        successful_sources.add(name)
+        if name == "context7":
+            libraries.extend(cast(list[LibraryDoc], value))
+        elif name == "github":
+            repos.extend(cast(list[Repo], value))
+        elif name == "huggingface":
+            models.extend(cast(list[HFModel], value))
+        else:
+            tagged = [
+                replace(
+                    paper,
+                    research_source=paper.research_source or name,
+                    query_lanes=tuple(dict.fromkeys(paper.query_lanes + (lane,))),
+                )
+                for paper in cast(list[Paper], value)
+            ]
+            paper_groups.setdefault(name, []).append((lane, tagged))
+    for name in factories:
+        groups = paper_groups.get(name)
+        if not groups:
+            continue
+        candidates: list[Paper] = []
+        for index in range(max(len(rows) for _, rows in groups)):
+            for _, rows in groups:
+                if index < len(rows):
+                    candidates.append(rows[index])
+        selected = _dedup_papers(candidates)[:limit]
+        papers.extend(selected)
+        count_by_source[name] = len(selected)
+
+    def dedup(items: list, key: Callable) -> list:
+        found: dict[str, object] = {}
+        for item in items:
+            found.setdefault(key(item), item)
+        return list(found.values())[:limit]
+
+    libraries = cast(
+        list[LibraryDoc], dedup(libraries, lambda item: item.url or item.name)
+    )
+    repos = cast(list[Repo], dedup(repos, lambda item: item.name))
+    models = cast(list[HFModel], dedup(models, lambda item: item.id))
+    for name, values in (
+        ("context7", libraries),
+        ("github", repos),
+        ("huggingface", models),
+    ):
+        if name in successful_sources:
+            count_by_source[name] = len(values)
+
+    def source_group(source: str) -> str:
+        return "paper" if source in _PAPER_SOURCES else "artifact"
+
+    on_topic_groups = {
+        (row.lane, source_group(row.source))
+        for row in source_statuses
+        if row.code == "ON-TOPIC"
+    }
+    source_statuses = [
+        replace(
+            row,
+            code="SOURCE-MISMATCH",
+            detail="this source returned 0 while a peer source found on-topic work",
+        )
+        if (
+            (row.lane, source_group(row.source)) in on_topic_groups
+            and row.code == "THIN"
+            and row.count == 0
+        )
+        else row
+        for row in source_statuses
+    ]
+    counts = [
+        (name, count_by_source[name])
+        for name in factories
+        if name in successful_sources
+    ]
     return ResearchDigest(
         topic=topic,
         papers=tuple(_dedup_papers(papers)),
@@ -1743,4 +2408,5 @@ async def research_topic(
         counts=tuple(counts),
         notes=tuple(notes),
         field_map=tuple(field_map),
+        source_statuses=tuple(source_statuses),
     )

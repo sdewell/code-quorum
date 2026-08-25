@@ -10,7 +10,8 @@ description: Generate divergent ideas from external council seats while the curr
 For every council start, `q_await` is the blocking completion notification. After completing the host's independent work, call it in the same turn as the start. Do not end the turn, tell the user you will check later, or leave a live `job_id` pending. If the council is still running, remain in the blocking call until it returns a result or error.
 
 Research-first: unless `--no-research` is passed, the run grounds itself in
-prior art (arXiv + OpenAlex + Europe PMC + Context7 + GitHub + HuggingFace)
+prior art (arXiv + OpenAlex + Europe PMC published/preprints + Context7 +
+GitHub + HuggingFace)
 *before* the council generates, and the digest is seeded into the agents'
 round-1 prompt as evidence. It is a research mode — treat the whole run as one.
 
@@ -68,6 +69,11 @@ finance, ❌ `data` / `alternative data` → ✓ `alternative data equity return
 need to hand-tune per backend — the tool shapes each source's query and strips arXiv's boolean
 operators for you.
 
+Form 2–3 semantic query lanes and pass them as `query_lanes`: domain +
+construct, failure/validity, and review/guideline terminology. Pass
+`purpose="methods"` so OpenAlex balances all-time and recent candidates. Do
+not manufacture lanes by repeatedly deleting words from one query.
+
 **The digest opens with a `Research status:` line — act on it before anything else, and quote it in
 Step 5.** It is the deterministic quality verdict:
 - `RETRY-RECOMMENDED` — the query whiffed or collided with unrelated work (off-topic hits, or every
@@ -84,12 +90,19 @@ Step 5.** It is the deterministic quality verdict:
 - `CONFIG` — a key/anonymous-access problem no retry fixes; proceed on the other sources and say so.
 - `OK` — results look on-topic; proceed.
 
+Immediately inspect `### Source/lane status`. Its rows are `ON-TOPIC`, `THIN`,
+`QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`. A combined
+OK does not erase a weak row. On `QUERY-COLLISION`, use the suggested mechanical
+shortening once; if that lane still collides, use a semantic re-anchor with
+different terminology. Retry an `INFRASTRUCTURE` row with the same lane, fix or
+disclose `CONFIG`, and accept `SOURCE-MISMATCH` rather than forcing a source to
+fit the domain.
+
 Mechanically-fixable failures (an arXiv 400, its 200-with-`Rate exceeded` rate refusal, a
 transient flake) are **already retried inside the
 tool** — a `↻` note marks a source that a first-attempt error you never saw was repaired on, not
-hidden. A domain-legitimate 0 in the per-source footer (Europe PMC on a non-biology topic,
-GitHub/HuggingFace on a non-software one, Context7 on a topic with no matching library) is a real
-answer, not a whiff to rework. Only after a **reworked* retry has **also** failed** may you note a
+hidden. A `SOURCE-MISMATCH` row is a real answer, not a whiff to rework. Only
+after a **reworked* retry has **also** failed** may you note a
 source unavailable and continue (never block on it) — start the council unseeded rather than not
 at all.
 

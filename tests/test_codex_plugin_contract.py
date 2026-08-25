@@ -388,6 +388,10 @@ def test_public_docs_explain_research_sources_credentials_and_hf_check() -> None
     assert "does not store their values" in flat
     assert "model IDs" in section
     assert "`[broadened]`" in section
+    assert "`europepmc-published`" in section
+    assert "`europepmc-preprints`" in section
+    assert "all-time" in section and "recent" in section
+    assert "Source/lane status" in section
     assert (
         "uv run pytest tests/test_research_live.py -m live -k huggingface -q" in section
     )

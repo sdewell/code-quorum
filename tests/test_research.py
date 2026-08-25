@@ -13,6 +13,7 @@ from quorum.research import (
     Paper,
     Repo,
     ResearchDigest,
+    SourceLaneStatus,
     _arxiv_id_from_doi,
     _clean_token,
     _compact_count,
@@ -22,13 +23,16 @@ from quorum.research import (
     _reconstruct_abstract,
     _redact,
     _retry_hint,
+    _source_lane_status,
     _strip_html,
     _truncate,
+    compute_status,
     fetch_context7,
     format_digest,
     research_topic,
     search_arxiv,
-    search_europepmc,
+    search_europepmc_preprints,
+    search_europepmc_published,
     search_github,
     search_huggingface,
     search_openalex,
@@ -74,7 +78,7 @@ def test_format_digest_renders_papers_libs_and_errors():
     )
     out = format_digest(digest)
     assert "## Prior art for: diffusion" in out
-    assert "### Papers (arXiv + OpenAlex + Europe PMC preprints)" in out
+    assert "### Papers (arXiv + OpenAlex + Europe PMC published/preprints)" in out
     assert "**A Paper** (2023, arxiv)" in out
     assert "Ada Lovelace, Alan Turing, Grace Hopper" in out  # capped at 3 authors
     assert "### Library docs (Context7)" in out
@@ -167,6 +171,7 @@ async def test_search_arxiv_parses_entries():
     assert first.year == 2023
     assert first.authors == ("Ada Lovelace", "Alan Turing")
     assert first.source == "arxiv"
+    assert first.research_source == "arxiv"
     assert first.url == "http://arxiv.org/abs/2301.12345v1"
     assert (
         first.abstract
@@ -244,6 +249,70 @@ async def test_search_openalex_parses_results():
     assert first.identifier == "2401.00001"  # arXiv id derived from DOI
     assert first.source == "openalex"
     assert papers[1].identifier == "https://doi.org/10.1109/TPAMI.2022.123"
+
+
+@pytest.mark.asyncio
+async def test_research_topic_methods_balances_openalex_strata():
+    seen: list[dict[str, str]] = []
+
+    def work(title: str, doi: str, year: int) -> dict:
+        return {
+            "title": title,
+            "publication_year": year,
+            "doi": doi,
+            "authorships": [],
+            "abstract_inverted_index": {"reproducibility": [0]},
+            "primary_topic": None,
+        }
+
+    def handler(request):
+        params = dict(request.url.params)
+        seen.append(params)
+        if "filter" in params:
+            results = [
+                work("Canonical method", "https://doi.org/10.1/canonical", 2020),
+                work("Recent method", "https://doi.org/10.1/recent", 2026),
+            ]
+        else:
+            results = [work("Canonical method", "https://doi.org/10.1/canonical", 2020)]
+        return httpx.Response(200, json={"results": results})
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "computational reproducibility",
+            sources={"openalex"},
+            purpose="methods",
+            limit=3,
+            client=client,
+        )
+
+    assert len(seen) == 2
+    assert all(params["sort"] == "relevance_score:desc" for params in seen)
+    assert any("filter" not in params for params in seen)
+    assert any("from_publication_date:" in params.get("filter", "") for params in seen)
+    papers = {paper.title: paper for paper in digest.papers}
+    assert papers["Canonical method"].strata == ("all-time", "recent")
+    assert papers["Recent method"].strata == ("recent",)
+
+
+@pytest.mark.asyncio
+async def test_research_topic_currency_keeps_openalex_five_year_filter():
+    seen: list[dict[str, str]] = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"results": []})
+
+    async with _client(handler) as client:
+        await research_topic(
+            "computational reproducibility",
+            sources={"openalex"},
+            purpose="currency",
+            client=client,
+        )
+
+    assert len(seen) == 1
+    assert "from_publication_date:" in seen[0]["filter"]
 
 
 def test_format_digest_omits_empty_url_link():
@@ -372,6 +441,54 @@ def test_dedup_papers_by_identifier():
     assert len(_dedup_papers([a, b])) == 1
 
 
+def test_dedup_papers_merges_richer_metadata():
+    sparse = _paper(title="Same", identifier="10.1/x", source="arxiv")
+    rich = dataclasses.replace(
+        _paper(title="Same", identifier="10.1/x", source="Journal"),
+        field="Bioinformatics",
+        strata=("recent",),
+        full_text_available=True,
+        full_text_url="https://europepmc.org/articles/PMC1",
+        mesh_terms=("Reproducibility of Results",),
+        query_lanes=("lane-2",),
+    )
+
+    [paper] = _dedup_papers([sparse, rich])
+
+    assert paper.field == "Bioinformatics"
+    assert paper.source == "Journal"
+    assert paper.strata == ("recent",)
+    assert paper.full_text_available is True
+    assert paper.full_text_url == "https://europepmc.org/articles/PMC1"
+    assert paper.mesh_terms == ("Reproducibility of Results",)
+    assert paper.query_lanes == ("lane-2",)
+
+
+def test_dedup_papers_fills_sparse_identity_without_overclaiming_full_text():
+    sparse = dataclasses.replace(
+        _paper(title="Same", identifier="", source="arxiv"),
+        authors=(),
+        year=None,
+        full_text_available=None,
+    )
+    rich = dataclasses.replace(
+        _paper(title="Same", identifier="10.1/x", source="Journal"),
+        authors=("Ada Lovelace",),
+        year=2024,
+        full_text_available=False,
+    )
+
+    [paper] = _dedup_papers([sparse, rich])
+
+    assert paper.identifier == "10.1/x"
+    assert paper.authors == ("Ada Lovelace",)
+    assert paper.year == 2024
+    assert paper.full_text_available is False
+    rendered = format_digest(ResearchDigest(topic="same", papers=(paper,)))
+    assert "no open full text identified by Europe PMC" in rendered
+    assert "full text unavailable" not in rendered
+
+
 def test_dedup_papers_keeps_distinct_punctuation_titles():
     # all-punctuation titles normalize to "" and must NOT collapse together
     a = _paper(title="???", identifier="id-a")
@@ -391,7 +508,10 @@ _HF_JSON = (
 
 
 def _all_sources_handler(arxiv_xml, openalex_json, c7_search, c7_docs, *, fail=None):
-    europepmc_json = (_FIXTURES / "europepmc_sample.json").read_text()
+    europepmc_preprint_json = (_FIXTURES / "europepmc_sample.json").read_text()
+    europepmc_published_json = (
+        _FIXTURES / "europepmc_published_sample.json"
+    ).read_text()
 
     def handler(request):
         host = request.url.host
@@ -402,7 +522,13 @@ def _all_sources_handler(arxiv_xml, openalex_json, c7_search, c7_docs, *, fail=N
         if host == "api.openalex.org":
             return httpx.Response(200, text=openalex_json)
         if host == "www.ebi.ac.uk":
-            return httpx.Response(200, text=europepmc_json)
+            payload = (
+                europepmc_preprint_json
+                if "SRC:PPR" in request.url.params["query"]
+                and "NOT SRC:PPR" not in request.url.params["query"]
+                else europepmc_published_json
+            )
+            return httpx.Response(200, text=payload)
         if host == "context7.com":
             if request.url.path.endswith("/search"):
                 return httpx.Response(200, text=c7_search)
@@ -428,8 +554,8 @@ async def test_research_topic_aggregates_all_sources():
         digest = await research_topic("diffusion", client=client)
 
     assert digest.topic == "diffusion"
-    # 2 arxiv + 2 openalex + 2 europepmc, no title overlap
-    assert len(digest.papers) == 6
+    assert len(digest.papers) == 7
+    assert any(paper.source == "Briefings in Bioinformatics" for paper in digest.papers)
     assert len(digest.libraries) == 1
     assert len(digest.repos) == 1
     assert len(digest.models) == 1
@@ -438,7 +564,8 @@ async def test_research_topic_aggregates_all_sources():
     assert dict(digest.counts) == {
         "arxiv": 2,
         "openalex": 2,
-        "europepmc": 2,
+        "europepmc-published": 1,
+        "europepmc-preprints": 2,
         "context7": 1,
         "github": 1,
         "huggingface": 1,
@@ -496,7 +623,7 @@ async def test_research_topic_isolates_a_failing_source():
 
     assert any(e.startswith("arxiv:") for e in digest.errors)
     # a dead arxiv sinks neither of its peer PAPER sources
-    assert len(digest.papers) == 4  # 2 openalex + 2 europepmc survived
+    assert len(digest.papers) == 5  # 2 OpenAlex + 3 Europe PMC hits survived
     assert len(digest.libraries) == 1  # context7 survived
 
 
@@ -1300,6 +1427,18 @@ async def test_search_huggingface_raw_zero_then_rate_limit_does_not_amplify_requ
     assert len(calls) == 2
 
 
+@pytest.mark.asyncio
+async def test_search_huggingface_treats_non_list_success_payload_as_empty():
+    async with _client(
+        lambda request: httpx.Response(200, json={"error": "unexpected payload"})
+    ) as client:
+        models = await search_huggingface(
+            client, "sentence embedding", limit=5, timeout=5.0, token=None
+        )
+
+    assert models == []
+
+
 def test_clean_token_strips_and_drops_malformed():
     assert _clean_token("  ghp_clean\n") == "ghp_clean"  # surrounding ws stripped
     assert _clean_token(None) is None
@@ -1313,6 +1452,10 @@ def test_redact_replaces_every_secret():
     out = _redact("err ghp_aaa and hf_bbb", ["ghp_aaa", "hf_bbb", ""])
     assert out == "err <redacted> and <redacted>"  # both secrets gone, empty skipped
     assert _redact("no secrets here", []) == "no secrets here"
+
+
+def test_redact_replaces_longest_overlapping_secret_first():
+    assert _redact("err tokenAB", ["tokenA", "tokenAB"]) == "err <redacted>"
 
 
 @pytest.mark.asyncio
@@ -1482,6 +1625,273 @@ def test_compact_count():
 
 
 @pytest.mark.asyncio
+async def test_search_europepmc_published_uses_full_corpus_metadata():
+    payload = (_FIXTURES / "europepmc_published_sample.json").read_text()
+    seen = {}
+
+    def handler(request):
+        seen["query"] = request.url.params["query"]
+        seen["result_type"] = request.url.params["resultType"]
+        seen["synonym"] = request.url.params["synonym"]
+        return httpx.Response(200, text=payload)
+
+    async with _client(handler) as client:
+        papers = await search_europepmc_published(
+            client,
+            "computational reproducibility",
+            limit=5,
+            timeout=5.0,
+            expand_synonyms=True,
+        )
+
+    assert "NOT SRC:PPR" in seen["query"]
+    assert "AND (NOT SRC:PPR)" not in seen["query"]
+    assert ") NOT SRC:PPR" in seen["query"]
+    assert seen["result_type"] == "core"
+    assert seen["synonym"] == "true"
+    assert len(papers) == 1
+    paper = papers[0]
+    assert paper.source == "Briefings in Bioinformatics"
+    assert paper.research_source == "europepmc-published"
+    assert paper.full_text_available is True
+    assert paper.full_text_url == "https://europepmc.org/articles/PMC1234567"
+    assert paper.mesh_terms == (
+        "Reproducibility of Results",
+        "Computational Biology",
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_synonyms_only_backfill_a_thin_exact_search():
+    calls: list[tuple[str, str]] = []
+
+    def row(identifier: str, title: str, abstract: str) -> dict:
+        return {
+            "id": identifier,
+            "source": "MED",
+            "title": title,
+            "abstractText": abstract,
+            "pubYear": "2024",
+        }
+
+    exact = [
+        row(
+            f"exact-{index}",
+            f"Computational provenance {index}",
+            "Computational provenance supports reproducible experiments.",
+        )
+        for index in range(2)
+    ]
+    expanded = exact + [
+        row(
+            f"expanded-{index}",
+            f"Unrelated biology {index}",
+            "A zebrafish gene expression assay.",
+        )
+        for index in range(3)
+    ]
+
+    def handler(request):
+        synonym = request.url.params["synonym"]
+        calls.append((synonym, request.url.params["pageSize"]))
+        rows = expanded if synonym == "true" else exact
+        return httpx.Response(200, json={"resultList": {"result": rows}})
+
+    async with _client(handler) as client:
+        papers = await search_europepmc_published(
+            client,
+            "computational provenance",
+            limit=5,
+            timeout=5.0,
+            expand_synonyms=True,
+        )
+
+    assert calls == [("false", "5"), ("true", "10")]
+    assert [paper.identifier for paper in papers[:2]] == ["exact-0", "exact-1"]
+    assert all(paper.strata == ("synonym-expanded",) for paper in papers[2:])
+    status = _source_lane_status(
+        "europepmc-published",
+        "lane-1",
+        "computational provenance",
+        papers,
+        None,
+    )
+    assert status.code == "THIN"
+    assert status.detail == (
+        "only 2 exact-match candidate(s); the rest are synonym-expanded"
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_synonym_duplicate_enriches_the_exact_record():
+    exact = {
+        "source": "MED",
+        "title": "Computational provenance standard",
+        "abstractText": "Computational provenance for reproducible experiments.",
+    }
+    enriched = {
+        **exact,
+        "doi": "10.1000/provenance",
+        "meshHeadingList": {
+            "meshHeading": [{"descriptorName": "Reproducibility of Results"}]
+        },
+    }
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        rows = [exact] if calls == 1 else [enriched]
+        return httpx.Response(200, json={"resultList": {"result": rows}})
+
+    async with _client(handler) as client:
+        [paper] = await search_europepmc_published(
+            client,
+            "computational provenance",
+            limit=2,
+            timeout=5.0,
+            expand_synonyms=True,
+        )
+
+    assert paper.identifier == "10.1000/provenance"
+    assert paper.mesh_terms == ("Reproducibility of Results",)
+    assert paper.strata == ()
+
+
+@pytest.mark.asyncio
+async def test_search_europepmc_published_does_not_claim_subscription_link_is_free():
+    payload = {
+        "resultList": {
+            "result": [
+                {
+                    "id": "paid-1",
+                    "source": "MED",
+                    "title": "A subscription article",
+                    "hasPDF": "Y",
+                    "isOpenAccess": "N",
+                    "inEPMC": "N",
+                    "fullTextUrlList": {
+                        "fullTextUrl": [
+                            {
+                                "availability": "Subscription required",
+                                "availabilityCode": "S",
+                                "url": "https://publisher.example/paid",
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    async with _client(lambda request: httpx.Response(200, json=payload)) as client:
+        [paper] = await search_europepmc_published(
+            client, "subscription article", limit=1, timeout=5.0
+        )
+
+    assert paper.full_text_available is False
+    assert paper.full_text_url == ""
+    rendered = format_digest(
+        ResearchDigest(topic="subscription article", papers=(paper,))
+    )
+    assert "[full text](" not in rendered
+    assert "full text unavailable" not in rendered
+    assert "no open full text identified by Europe PMC" in rendered
+
+
+@pytest.mark.asyncio
+async def test_published_full_text_url_rejects_markdown_delimiters():
+    payload = {
+        "resultList": {
+            "result": [
+                {
+                    "id": "unsafe-1",
+                    "source": "MED",
+                    "title": "An article with an unsafe full-text URL",
+                    "isOpenAccess": "Y",
+                    "fullTextUrlList": {
+                        "fullTextUrl": [
+                            {
+                                "availabilityCode": "OA",
+                                "url": "https://example.org/paper) injected",
+                            }
+                        ]
+                    },
+                }
+            ]
+        }
+    }
+    async with _client(lambda request: httpx.Response(200, json=payload)) as client:
+        [paper] = await search_europepmc_published(
+            client, "unsafe full text", limit=1, timeout=5.0
+        )
+
+    assert paper.full_text_url == ""
+    assert "injected" not in format_digest(
+        ResearchDigest(topic="unsafe full text", papers=(paper,))
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_full_text_availability_is_unknown_when_flags_are_absent():
+    payload = {
+        "resultList": {
+            "result": [
+                {
+                    "id": "unknown-1",
+                    "source": "MED",
+                    "title": "An article with incomplete availability metadata",
+                }
+            ]
+        }
+    }
+    async with _client(lambda request: httpx.Response(200, json=payload)) as client:
+        [paper] = await search_europepmc_published(
+            client, "availability metadata", limit=1, timeout=5.0
+        )
+
+    assert paper.full_text_available is None
+
+
+@pytest.mark.asyncio
+async def test_europepmc_sources_do_not_submit_query_stripped_to_empty():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={"resultList": {"result": []}})
+
+    async with _client(handler) as client:
+        published = await search_europepmc_published(client, "()", limit=5, timeout=5.0)
+        preprints = await search_europepmc_preprints(client, '""', limit=5, timeout=5.0)
+
+    assert published == []
+    assert preprints == []
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_europepmc_sources_strip_boolean_and_field_syntax_from_user_query():
+    queries: list[str] = []
+
+    def handler(request):
+        queries.append(request.url.params["query"])
+        return httpx.Response(200, json={"resultList": {"result": []}})
+
+    async with _client(handler) as client:
+        await search_europepmc_published(
+            client, "gene editing NOT CRISPR SRC:MED", limit=5, timeout=5.0
+        )
+        await search_europepmc_preprints(
+            client, "gene editing NOT CRISPR SRC:MED", limit=5, timeout=5.0
+        )
+
+    user_groups = [query.split(")", 1)[0] for query in queries]
+    assert all("NOT" not in group for group in user_groups)
+    assert all(":" not in group for group in user_groups)
+
+
+@pytest.mark.asyncio
 async def test_search_europepmc_parses_results():
     payload = (_FIXTURES / "europepmc_sample.json").read_text()
 
@@ -1490,7 +1900,7 @@ async def test_search_europepmc_parses_results():
         return httpx.Response(200, text=payload)
 
     async with _client(handler) as client:
-        papers = await search_europepmc(
+        papers = await search_europepmc_preprints(
             client, "batch correction", limit=5, timeout=5.0
         )
 
@@ -1511,7 +1921,7 @@ async def test_search_europepmc_reports_the_preprint_server_as_the_source():
     payload = (_FIXTURES / "europepmc_sample.json").read_text()
 
     async with _client(lambda r: httpx.Response(200, text=payload)) as client:
-        papers = await search_europepmc(
+        papers = await search_europepmc_preprints(
             client, "batch correction", limit=5, timeout=5.0
         )
 
@@ -1525,7 +1935,7 @@ async def test_search_europepmc_strips_html_from_abstracts():
     payload = (_FIXTURES / "europepmc_sample.json").read_text()
 
     async with _client(lambda r: httpx.Response(200, text=payload)) as client:
-        papers = await search_europepmc(
+        papers = await search_europepmc_preprints(
             client, "batch correction", limit=5, timeout=5.0
         )
 
@@ -1546,7 +1956,9 @@ async def test_search_europepmc_pins_query_to_preprints_excluding_arxiv():
         return httpx.Response(200, json={"resultList": {"result": []}})
 
     async with _client(handler) as client:
-        await search_europepmc(client, "protein folding", limit=5, timeout=5.0)
+        await search_europepmc_preprints(
+            client, "protein folding", limit=5, timeout=5.0
+        )
 
     assert "protein folding" in seen["query"]
     assert "SRC:PPR" in seen["query"]
@@ -1566,7 +1978,9 @@ async def test_search_europepmc_does_not_query_on_a_blank_topic():
         return httpx.Response(200, json={"resultList": {"result": []}})
 
     async with _client(handler) as client:
-        assert await search_europepmc(client, "   ", limit=5, timeout=5.0) == []
+        assert (
+            await search_europepmc_preprints(client, "   ", limit=5, timeout=5.0) == []
+        )
 
     assert not called
 
@@ -1621,11 +2035,13 @@ async def test_search_europepmc_strips_query_syntax_that_could_restructure_the_p
         return httpx.Response(200, json={"resultList": {"result": []}})
 
     async with _client(handler) as client:
-        await search_europepmc(client, 'cancer) OR (SRC:MED "x', limit=5, timeout=5.0)
+        await search_europepmc_preprints(
+            client, 'cancer) OR (SRC:MED "x', limit=5, timeout=5.0
+        )
 
     q = seen["query"]
     # exactly one group around the topic, and the pin is its own group
-    assert q == '(cancer OR SRC:MED x) AND (SRC:PPR NOT PUBLISHER:"arXiv")'
+    assert q == '(cancer SRC MED x) AND (SRC:PPR NOT PUBLISHER:"arXiv")'
 
 
 @pytest.mark.asyncio
@@ -1638,7 +2054,7 @@ async def test_search_europepmc_survives_null_json_fields():
         return httpx.Response(200, json={"resultList": None})
 
     async with _client(handler) as client:
-        assert await search_europepmc(client, "x", limit=5, timeout=5.0) == []
+        assert await search_europepmc_preprints(client, "x", limit=5, timeout=5.0) == []
 
     def null_authors(request):
         return httpx.Response(
@@ -1651,7 +2067,7 @@ async def test_search_europepmc_survives_null_json_fields():
         )
 
     async with _client(null_authors) as client:
-        papers = await search_europepmc(client, "x", limit=5, timeout=5.0)
+        papers = await search_europepmc_preprints(client, "x", limit=5, timeout=5.0)
 
     assert len(papers) == 1 and papers[0].authors == ()
 
@@ -1847,25 +2263,83 @@ def test_claim_rate_slot_serializes_concurrent_refusals(monkeypatch):
     assert research_mod._claim_rate_slot(200.0) == 203.0
 
 
-def test_europepmc_is_a_default_source():
-    assert "europepmc" in DEFAULT_SOURCES
-    assert validate_sources(["europepmc"]) == {"europepmc"}
+def test_claim_rate_slot_refuses_unbounded_queue_debt(monkeypatch):
+    import quorum.research as research_mod
+
+    monkeypatch.setattr(research_mod, "_RATE_PAUSE_S", 3.0)
+    monkeypatch.setattr(research_mod, "_MAX_RATE_WAIT_S", 9.0)
+    monkeypatch.setattr(research_mod, "_rate_next_free", 0.0)
+
+    assert [research_mod._claim_rate_slot(100.0) for _ in range(4)] == [
+        103.0,
+        106.0,
+        109.0,
+        None,
+    ]
+
+
+def test_europepmc_sources_split_published_work_from_preprints():
+    assert "europepmc-published" in DEFAULT_SOURCES
+    assert "europepmc-preprints" in DEFAULT_SOURCES
+    assert "europepmc" not in DEFAULT_SOURCES
+    assert validate_sources(["europepmc-published", "europepmc-preprints"]) == {
+        "europepmc-published",
+        "europepmc-preprints",
+    }
+
+
+def test_legacy_europepmc_source_names_both_replacements():
+    with pytest.raises(
+        ValueError,
+        match=r"europepmc was split into europepmc-published and europepmc-preprints",
+    ):
+        validate_sources(["europepmc"])
+
+
+@pytest.mark.asyncio
+async def test_research_topic_queries_both_europepmc_sources():
+    queries: list[str] = []
+
+    def handler(request):
+        queries.append(request.url.params["query"])
+        return httpx.Response(200, json={"resultList": {"result": []}})
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "protein folding",
+            sources={"europepmc-published", "europepmc-preprints"},
+            client=client,
+        )
+
+    assert dict(digest.counts) == {
+        "europepmc-published": 0,
+        "europepmc-preprints": 0,
+    }
+    assert any("NOT SRC:PPR" in query for query in queries)
+    assert any(
+        "SRC:PPR" in query and 'NOT PUBLISHER:"arXiv"' in query for query in queries
+    )
 
 
 def test_format_digest_counts_europepmc_when_reporting_dropped_duplicates():
-    """europepmc is a PAPER source: leaving it out of the paper-source set makes the
-    dedup footer under-report (here: hide) the duplicates that were dropped."""
+    """Both Europe PMC lanes are paper sources for duplicate accounting."""
     out = format_digest(
         ResearchDigest(
             topic="t",
             papers=(_paper(),),
             libraries=(),
             errors=(),
-            counts=(("arxiv", 1), ("openalex", 1), ("europepmc", 1)),
+            counts=(
+                ("arxiv", 1),
+                ("openalex", 1),
+                ("europepmc-published", 1),
+                ("europepmc-preprints", 1),
+            ),
         )
     )
-    assert "Europe PMC 1" in out
-    assert "2 duplicate paper(s) dropped" in out
+    assert "Europe PMC published 1" in out
+    assert "Europe PMC preprints 1" in out
+    assert "3 duplicate paper(s) dropped" in out
 
 
 # --- Query verdict: on-topic scoring (Layer 3) --------------------------------
@@ -2055,7 +2529,11 @@ def test_compute_status_all_paper_sources_zero_is_retry():
         papers=(),
         libraries=(),
         errors=(),
-        counts=(("arxiv", 0), ("openalex", 0), ("europepmc", 0)),
+        counts=(
+            ("arxiv", 0),
+            ("openalex", 0),
+            ("europepmc-preprints", 0),
+        ),
     )
     status = compute_status(digest)
     assert status.code == "RETRY-RECOMMENDED"
@@ -2072,7 +2550,12 @@ def test_compute_status_legitimate_zero_is_ok():
         papers=(_paper(title="Flow matching for diffusion", abstract="flow matching"),),
         libraries=(),
         errors=(),
-        counts=(("arxiv", 1), ("openalex", 1), ("europepmc", 0), ("github", 0)),
+        counts=(
+            ("arxiv", 1),
+            ("openalex", 1),
+            ("europepmc-preprints", 0),
+            ("github", 0),
+        ),
     )
     status = compute_status(digest)
     assert status.code == "OK"
@@ -2139,6 +2622,502 @@ def test_format_digest_opens_with_research_status_line():
         mode="exploratory",
     )
     assert explor.splitlines()[0].startswith("Research status: LOW-OVERLAP")
+
+
+def test_exploratory_combined_status_accepts_cross_domain_lane_overlap():
+    digest = ResearchDigest(
+        topic="sinkhorn transport",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="sinkhorn transport",
+                code="QUERY-COLLISION",
+                detail="cross-domain vocabulary",
+                count=5,
+            ),
+        ),
+    )
+
+    status = compute_status(digest, mode="exploratory")
+
+    assert status.code == "LOW-OVERLAP"
+
+
+@pytest.mark.asyncio
+async def test_query_lanes_report_status_per_source_without_hiding_good_lane():
+    def rows(prefix: str, abstract: str) -> list[dict]:
+        return [
+            {
+                "id": f"{prefix}-{index}",
+                "source": "MED",
+                "title": f"{prefix} {index}",
+                "abstractText": abstract,
+                "pubYear": "2024",
+            }
+            for index in range(3)
+        ]
+
+    def handler(request):
+        query = request.url.params["query"]
+        if "computational reproducibility" in query:
+            result = rows(
+                "Computational reproducibility method",
+                "A computational reproducibility method for experiments.",
+            )
+        else:
+            result = rows(
+                "Cancer biomarker",
+                "A clinical oncology biomarker validation study.",
+            )
+        return httpx.Response(200, json={"resultList": {"result": result}})
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "execution provenance",
+            query_lanes=(
+                "computational reproducibility method",
+                "minimum information reporting provenance",
+            ),
+            sources={"europepmc-published"},
+            client=client,
+        )
+
+    statuses = {(row.lane, row.code) for row in digest.source_statuses}
+    assert statuses == {
+        ("lane-1", "ON-TOPIC"),
+        ("lane-2", "QUERY-COLLISION"),
+    }
+    rendered = format_digest(digest)
+    assert rendered.startswith("Research status: OK")
+    assert "### Source/lane status" in rendered
+    assert "| Europe PMC published | lane-1 | ON-TOPIC |" in rendered
+    assert "| Europe PMC published | lane-2 | QUERY-COLLISION |" in rendered
+    assert "only 0% of candidates share lane vocabulary" in rendered
+
+
+@pytest.mark.asyncio
+async def test_empty_peer_source_is_reported_as_source_mismatch():
+    works = {
+        "results": [
+            {
+                "title": f"Computational reproducibility method {index}",
+                "publication_year": 2024,
+                "doi": f"https://doi.org/10.1/{index}",
+                "authorships": [],
+                "abstract_inverted_index": {
+                    "computational": [0],
+                    "reproducibility": [1],
+                },
+                "primary_topic": None,
+            }
+            for index in range(3)
+        ]
+    }
+
+    def handler(request):
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(200, json=works)
+        return httpx.Response(200, json={"resultList": {"result": []}})
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "computational reproducibility method",
+            sources={"openalex", "europepmc-preprints"},
+            client=client,
+        )
+
+    statuses = {row.source: row.code for row in digest.source_statuses}
+    assert statuses["openalex"] == "ON-TOPIC"
+    assert statuses["europepmc-preprints"] == "SOURCE-MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_artifact_hit_cannot_hide_empty_paper_stratum():
+    repos = {
+        "items": [
+            {
+                "full_name": f"org/computational-provenance-{index}",
+                "description": "computational provenance artifacts",
+                "stargazers_count": 10 - index,
+                "html_url": f"https://github.com/org/repo-{index}",
+            }
+            for index in range(3)
+        ]
+    }
+
+    def handler(request):
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json=repos)
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "computational provenance artifacts",
+            sources={"openalex", "github"},
+            client=client,
+        )
+
+    statuses = {row.source: row.code for row in digest.source_statuses}
+    assert statuses["github"] == "ON-TOPIC"
+    assert statuses["openalex"] == "THIN"
+    assert compute_status(digest).code == "RETRY-RECOMMENDED"
+
+
+@pytest.mark.asyncio
+async def test_colliding_short_lane_requires_semantic_reanchor():
+    result = [
+        {
+            "id": f"cancer-{index}",
+            "source": "MED",
+            "title": f"Cancer biomarker {index}",
+            "abstractText": "A clinical oncology biomarker validation study.",
+            "pubYear": "2024",
+        }
+        for index in range(3)
+    ]
+
+    async with _client(
+        lambda request: httpx.Response(200, json={"resultList": {"result": result}})
+    ) as client:
+        digest = await research_topic(
+            "minimum information reporting provenance",
+            sources={"europepmc-published"},
+            client=client,
+        )
+
+    status = compute_status(digest)
+    assert status.code == "RETRY-RECOMMENDED"
+    assert status.suggested_query == ""
+    assert "semantically re-anchor" in status.detail
+
+
+@pytest.mark.asyncio
+async def test_failed_arxiv_shortening_is_not_suggested_again():
+    async with _client(lambda request: httpx.Response(400, text="bad query")) as client:
+        digest = await research_topic(
+            "computational experiment provenance reproducibility artifacts",
+            sources={"arxiv"},
+            client=client,
+        )
+
+    assert digest.source_statuses[0].query == (
+        "computational experiment provenance reproducibility"
+    )
+    status = compute_status(digest)
+    assert status.code == "RETRY-RECOMMENDED"
+    assert status.suggested_query == ""
+
+
+def test_reworked_suggestion_names_the_colliding_lane():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-2",
+                query="minimum information experimental reporting provenance",
+                code="QUERY-COLLISION",
+                detail="collision",
+                count=3,
+            ),
+        ),
+    )
+
+    rendered = format_digest(digest)
+
+    assert '· try lane-2: "minimum information experimental reporting"' in rendered
+
+
+@pytest.mark.asyncio
+async def test_small_limit_is_thin_but_not_forced_to_retry():
+    result = [
+        {
+            "id": f"method-{index}",
+            "source": "MED",
+            "title": f"Computational reproducibility method {index}",
+            "abstractText": "A computational reproducibility method.",
+            "pubYear": "2024",
+        }
+        for index in range(2)
+    ]
+    async with _client(
+        lambda request: httpx.Response(200, json={"resultList": {"result": result}})
+    ) as client:
+        digest = await research_topic(
+            "computational reproducibility method",
+            sources={"europepmc-published"},
+            limit=2,
+            client=client,
+        )
+
+    assert digest.source_statuses[0].code == "THIN"
+    assert compute_status(digest).code == "OK"
+
+
+def test_unscoreable_papers_are_thin_not_on_topic():
+    status = _source_lane_status(
+        "europepmc-published",
+        "lane-1",
+        "computational reproducibility",
+        [
+            dataclasses.replace(_paper(title=f"Unrelated title {index}"), abstract="")
+            for index in range(3)
+        ],
+        None,
+    )
+
+    assert status.code == "THIN"
+
+
+def test_huggingface_model_ids_are_thin_not_query_collisions():
+    status = _source_lane_status(
+        "huggingface",
+        "lane-1",
+        "protein language model",
+        [
+            HFModel(
+                id=f"org/model-{index}",
+                downloads=100,
+                likes=1,
+                pipeline_tag="feature-extraction",
+                library_name="transformers",
+                url=f"https://huggingface.co/org/model-{index}",
+            )
+            for index in range(3)
+        ],
+        None,
+    )
+
+    assert status.code == "THIN"
+
+
+def test_descriptionless_repositories_are_thin_not_query_collisions():
+    status = _source_lane_status(
+        "github",
+        "lane-1",
+        "computational provenance",
+        [
+            Repo(
+                name=f"org/provenance-{index}",
+                description="",
+                stars=10,
+                language=None,
+                url=f"https://github.com/org/provenance-{index}",
+            )
+            for index in range(3)
+        ],
+        None,
+    )
+
+    assert status.code == "THIN"
+
+
+def test_library_snippets_supply_scoreable_status_text():
+    status = _source_lane_status(
+        "context7",
+        "lane-1",
+        "computational provenance",
+        [
+            LibraryDoc(
+                name=f"library-{index}",
+                description="",
+                snippets=("Computational provenance records execution artifacts.",),
+                trust_score=9.0,
+                url=f"https://context7.com/library-{index}",
+            )
+            for index in range(3)
+        ],
+        None,
+    )
+
+    assert status.code == "ON-TOPIC"
+
+
+@pytest.mark.asyncio
+async def test_artifact_sources_only_use_the_primary_semantic_lane():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {
+                        "full_name": "org/provenance-tool",
+                        "description": "computational provenance artifacts",
+                        "stargazers_count": 10,
+                        "html_url": "https://github.com/org/provenance-tool",
+                    }
+                ]
+            },
+        )
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "execution provenance",
+            query_lanes=(
+                "computational provenance artifacts",
+                "raw data traceability",
+                "minimum information reporting",
+            ),
+            sources={"github"},
+            client=client,
+        )
+
+    assert calls == 1
+    assert len(digest.source_statuses) == 1
+    assert len(digest.repos) == 1
+
+
+@pytest.mark.asyncio
+async def test_sources_run_concurrently_while_each_sources_lanes_stay_sequential(
+    monkeypatch,
+):
+    import quorum.research as research_mod
+
+    second_openalex_lane_started = asyncio.Event()
+    calls: dict[str, list[str]] = {"arxiv": [], "openalex": []}
+
+    async def fake_arxiv(client, query, *, limit, timeout):
+        calls["arxiv"].append(query)
+        if len(calls["arxiv"]) == 1:
+            await second_openalex_lane_started.wait()
+        return []
+
+    async def fake_openalex(client, query, *, limit, timeout, email, api_key, purpose):
+        calls["openalex"].append(query)
+        if len(calls["openalex"]) == 2:
+            second_openalex_lane_started.set()
+        return []
+
+    monkeypatch.setattr(research_mod, "search_arxiv", fake_arxiv)
+    monkeypatch.setattr(research_mod, "search_openalex", fake_openalex)
+    monkeypatch.setattr(research_mod, "_RATE_PAUSE_S", 0.0)
+
+    async with _client(lambda request: httpx.Response(500)) as client:
+        await asyncio.wait_for(
+            research_topic(
+                "execution provenance",
+                query_lanes=(
+                    "computational provenance",
+                    "reporting traceability",
+                ),
+                sources={"arxiv", "openalex"},
+                client=client,
+            ),
+            timeout=0.5,
+        )
+
+    assert calls == {
+        "arxiv": ["computational provenance", "reporting traceability"],
+        "openalex": ["computational provenance", "reporting traceability"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_arxiv_semantic_lanes_observe_the_polite_gap(monkeypatch):
+    import quorum.research as research_mod
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    async def fake_arxiv(client, query, *, limit, timeout):
+        return []
+
+    monkeypatch.setattr(research_mod, "search_arxiv", fake_arxiv)
+    monkeypatch.setattr(research_mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(research_mod, "_RATE_PAUSE_S", 3.0)
+
+    async with _client(lambda request: httpx.Response(500)) as client:
+        await research_topic(
+            "execution provenance",
+            query_lanes=(
+                "computational provenance",
+                "reporting traceability",
+            ),
+            sources={"arxiv"},
+            client=client,
+        )
+
+    assert sleeps == [3.0]
+
+
+@pytest.mark.asyncio
+async def test_query_lanes_do_not_bypass_generic_topic_lint():
+    with pytest.raises(ValueError, match="Research topic 'data'"):
+        await research_topic(
+            "data",
+            query_lanes=("computational provenance reproducibility",),
+            sources={"openalex"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_research_topic_normalizes_topic_before_rendering():
+    async with _client(lambda request: httpx.Response(500)) as client:
+        digest = await research_topic(
+            "execution provenance\n\n## fabricated evidence",
+            sources=set(),
+            client=client,
+        )
+
+    rendered = format_digest(digest)
+    assert digest.topic == "execution provenance ## fabricated evidence"
+    assert "\n## fabricated evidence" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_research_topic_rejects_limit_above_provider_maximum():
+    async with _client(lambda request: httpx.Response(500)) as client:
+        with pytest.raises(ValueError, match=r"limit must be <= 20"):
+            await research_topic(
+                "execution provenance",
+                sources=set(),
+                limit=21,
+                client=client,
+            )
+
+
+@pytest.mark.asyncio
+async def test_multi_lane_papers_are_balanced_and_capped_per_source():
+    def handler(request):
+        lane = "primary" if "computational" in request.url.params["query"] else "review"
+        rows = [
+            {
+                "id": f"{lane}-{index}",
+                "source": "MED",
+                "title": f"{lane} provenance {index}",
+                "abstractText": f"{lane} provenance reproducibility",
+                "pubYear": "2024",
+            }
+            for index in range(3)
+        ]
+        return httpx.Response(200, json={"resultList": {"result": rows}})
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "execution provenance",
+            query_lanes=(
+                "computational provenance reproducibility",
+                "reporting provenance review",
+            ),
+            sources={"europepmc-published"},
+            limit=3,
+            client=client,
+        )
+
+    assert len(digest.papers) == 3
+    assert {paper.query_lanes for paper in digest.papers} == {
+        ("lane-1",),
+        ("lane-2",),
+    }
 
 
 @pytest.mark.asyncio
@@ -2210,6 +3189,7 @@ async def test_research_topic_does_not_retry_a_config_error():
     assert len(calls) == 1  # no retry on a config-class error
     assert digest.errors and "401" in digest.errors[0]
     assert not digest.notes
+    assert "retry will not fix" in format_digest(digest).lower()
 
 
 def test_format_digest_renders_retry_notes():
@@ -2440,6 +3420,24 @@ def test_format_digest_annotates_field_in_exploratory_mode_only():
     assert "[field: Geophysics]" not in grounded
 
 
+def test_format_digest_shows_openalex_strata_and_full_text_availability():
+    paper = dataclasses.replace(
+        _paper(source="Briefings in Bioinformatics"),
+        research_source="europepmc-published",
+        strata=("all-time", "recent"),
+        full_text_available=True,
+        full_text_url="https://europepmc.org/articles/PMC123",
+        query_lanes=("lane-1", "lane-2"),
+    )
+
+    rendered = format_digest(ResearchDigest(topic="reproducibility", papers=(paper,)))
+
+    assert "[strata: all-time, recent]" in rendered
+    assert "[source: Europe PMC published]" in rendered
+    assert "[lanes: lane-1, lane-2]" in rendered
+    assert "[full text] <https://europepmc.org/articles/PMC123>" in rendered
+
+
 def test_compute_status_all_paper_sources_errored_is_not_ok():
     """When every paper source errors, none reach digest.counts. The verdict
     must be RETRY-RECOMMENDED, not 'results look on-topic'."""
@@ -2451,7 +3449,7 @@ def test_compute_status_all_paper_sources_errored_is_not_ok():
         errors=(
             "arxiv: TimeoutException: slow",
             "openalex: TimeoutException: slow",
-            "europepmc: TimeoutException: slow",
+            "europepmc-preprints: TimeoutException: slow",
         ),
         counts=(),
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -141,16 +143,52 @@ def test_run_outside_code_quorum_environment_reports_clean_error() -> None:
     )
     assert result.returncode == 2
     assert (
-        "verify_codex_approvals.py must run inside the code-quorum environment: "
-        f"uv run --directory {_ROOT} python scripts/verify_codex_approvals.py"
+        "verify_codex_approvals.py must run inside the code-quorum environment "
+        "being verified. Use that checkout for --directory and this script by "
+        "absolute path. "
+        f"For this checkout: uv run --directory {_ROOT} python {_SCRIPT}. "
+        "For installed-release verification, follow docs/RELEASING.md step 8."
         in result.stderr
     )
+    assert "/path/to/stable/code-quorum" not in result.stderr
     assert "ModuleNotFoundError" not in result.stderr
+
+
+def test_run_against_incompatible_code_quorum_reports_clean_error(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "quorum"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "codex_update.py").write_text("APPROVED_TOOLS = ()\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path)
+
+    result = subprocess.run(
+        [sys.executable, "-S", str(_SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 2
+    assert "environment is incompatible with this verifier" in result.stderr
+    assert (
+        "use a verifier revision compatible with that installed release"
+        in result.stderr
+    )
+    assert "Traceback" not in result.stderr
 
 
 def test_workshop_release_runbook_owns_github_install_verification() -> None:
     releasing = (_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
     flat = " ".join(releasing.split())
+    verifier_invocations = re.findall(
+        r"uv run (?:--no-sync )?--directory /path/to/stable/code-quorum\s*"
+        r"\\?\s*python /path/to/workshop/code-quorum/"
+        r"scripts/verify_codex_approvals\.py",
+        releasing,
+    )
 
     assert "--project-root /path/to/stable/code-quorum" in releasing
     assert "plugins/cache/code-quorum" not in releasing
@@ -164,6 +202,13 @@ def test_workshop_release_runbook_owns_github_install_verification() -> None:
     assert "GitHub-install verification" in releasing
     assert "scripts/verify_codex_approvals.py" in releasing
     assert "workshop-only" in releasing
+    assert len(verifier_invocations) >= 2
+    assert "uv run --no-sync --directory /path/to/stable/code-quorum" in releasing
+    assert "persistent checkout of the public `sdewell/code-quorum`" in flat
+    assert "stable workshop checkout" not in flat
+    assert "stable helper checkout" not in flat
+    assert "stable public runtime checkout" not in flat
+    assert "always reads `~/.codex/config.toml`" in flat
     assert "~/.local/share/code-quorum/marketplace-local-X.Y.Z" in releasing
     assert "source-swap fallback" in releasing
     assert "true first install" in releasing

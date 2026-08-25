@@ -1,0 +1,40 @@
+{
+  "hitCount": 1,
+  "resultList": {
+    "result": [
+      {
+        "id": "12345678",
+        "source": "MED",
+        "pmcid": "PMC1234567",
+        "doi": "10.1093/bib/bbad375",
+        "title": "The five pillars of computational reproducibility",
+        "authorList": {
+          "author": [{ "fullName": "Ziemann M" }, { "fullName": "Poulain P" }]
+        },
+        "pubYear": "2023",
+        "journalTitle": "Briefings in Bioinformatics",
+        "abstractText": "A framework for computational reproducibility in bioinformatics.",
+        "isOpenAccess": "Y",
+        "inEPMC": "Y",
+        "hasPDF": "Y",
+        "fullTextUrlList": {
+          "fullTextUrl": [
+            {
+              "availability": "Open access",
+              "availabilityCode": "OA",
+              "documentStyle": "html",
+              "site": "Europe_PMC",
+              "url": "https://europepmc.org/articles/PMC1234567"
+            }
+          ]
+        },
+        "meshHeadingList": {
+          "meshHeading": [
+            { "descriptorName": "Reproducibility of Results" },
+            { "descriptorName": "Computational Biology" }
+          ]
+        }
+      }
+    ]
+  }
+}

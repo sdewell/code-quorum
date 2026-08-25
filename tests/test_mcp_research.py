@@ -22,6 +22,33 @@ async def test_q_research_impl_returns_markdown(monkeypatch):
     assert "**lib**" in out
 
 
+@pytest.mark.asyncio
+async def test_q_research_passes_purpose_and_semantic_query_lanes(monkeypatch):
+    seen = {}
+
+    async def fake_research_topic(topic, **kw):
+        seen.update(kw)
+        return ResearchDigest(topic=topic, papers=())
+
+    monkeypatch.setattr(server, "research_topic", fake_research_topic)
+    await server.q_research(
+        "execution provenance",
+        None,
+        5,
+        purpose="currency",
+        query_lanes=[
+            "computational experiment provenance",
+            "minimum information reporting provenance",
+        ],
+    )
+
+    assert seen["purpose"] == "currency"
+    assert seen["query_lanes"] == (
+        "computational experiment provenance",
+        "minimum information reporting provenance",
+    )
+
+
 def test_q_research_docstring_demands_domain_anchored_query():
     # The description must steer query FORMATION away from generic single tokens
     # (which return non-zero but off-topic noise) toward domain-anchored terms.

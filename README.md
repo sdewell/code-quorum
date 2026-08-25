@@ -62,14 +62,22 @@ forms below to select one explicitly:
 
 ### Research sources and credentials
 
-`q-research` queries all six sources by default. Repeat `--source <name>` to
-restrict a run.
+`q-research` queries all seven sources by default. Repeat `--source <name>` to
+restrict a run. It accepts up to three `--query-lane` formulations and reports a
+`Source/lane status` table so a strong source cannot hide a collision elsewhere.
+Use `--purpose methods` (default) for balanced all-time and recent OpenAlex
+strata, or `--purpose currency` for the recent five-year stratum only. Literature
+sources search every lane; artifact sources (Context7, GitHub, and Hugging Face)
+search only the primary lane to avoid redundant results and API traffic. The
+per-source result limit stays fixed across lanes, so additional lanes broaden
+coverage without growing the digest without bound.
 
 | Source | Target | Credential policy |
 |---|---|---|
 | arXiv (`arxiv`) | Scholarly papers and preprints from arXiv search. | None. |
-| OpenAlex (`openalex`) | Recent works and abstracts; exploratory mode also produces a subfield map. | `OPENALEX_API_KEY` or `QUORUM_OPENALEX_API_KEY` is required for normal OpenAlex use. `QUORUM_OPENALEX_EMAIL` identifies the client but does not replace the key. |
-| Europe PMC (`europepmc`) | Life-sciences preprints from bioRxiv, medRxiv, Research Square, and similar sources; arXiv records are excluded. | None. |
+| OpenAlex (`openalex`) | Methods searches balance all-time relevance/canonical candidates with recent five-year candidates and retain the stratum labels; currency searches use only the recent stratum. Exploratory mode also produces a subfield map. | `OPENALEX_API_KEY` or `QUORUM_OPENALEX_API_KEY` is required for normal OpenAlex use. `QUORUM_OPENALEX_EMAIL` identifies the client but does not replace the key. |
+| Europe PMC published (`europepmc-published`) | Published life-sciences literature, including PubMed/MEDLINE records, reviews, MeSH metadata, and full-text availability. Exact matches have priority; MeSH synonym expansion only backfills a thin exact result set. | None. |
+| Europe PMC preprints (`europepmc-preprints`) | Life-sciences preprints from bioRxiv, medRxiv, Research Square, and similar sources; arXiv records are excluded. | None. |
 | Context7 (`context7`) | High-trust library matches and documentation snippets. | `CONTEXT7_API_KEY` is recommended because anonymous requests can be rate-limited. |
 | GitHub (`github`) | Public repositories matched by name, description, and topics, then ranked by stars. | `GH_TOKEN` or `GITHUB_TOKEN` is recommended for higher limits. Private repositories are excluded. |
 | Hugging Face (`huggingface`) | Public model IDs and metadata, ranked by downloads. Term-fallback results carry `[broadened]`. | `HF_TOKEN` or `QUORUM_HF_TOKEN` is recommended for account-level Hub limits. Private models are filtered out. |

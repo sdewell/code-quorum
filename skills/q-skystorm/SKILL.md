@@ -74,6 +74,8 @@ far-afield domains come back *from the literature* instead of your own priors.
   overlap check needs ≥3 papers to fire, so if the anchor returns only one
   or two, `OK` is not a clean bill — eyeball those titles yourself before
   harvesting.
+  Form 2–3 home-domain semantic lanes and pass them as `query_lanes` with
+  `purpose="methods"`; do not create variants by only deleting words.
 - **Harvest.** From the anchor's returned abstracts, pick 1–2 *method*
   terms — a named algorithm, transform, or update rule that recurs but was
   *not* in your query (e.g. "Sinkhorn iteration", "low-rank matrix
@@ -115,8 +117,11 @@ fixable failures (arXiv 400, its 200-with-`Rate exceeded` rate refusal, a
 transient flake) are already retried inside
 the tool — a `↻` note means a first-attempt error you never saw was
 handled, not hidden. A domain-legitimate 0 (GitHub/HuggingFace on a
-non-software topic, Europe PMC on a non-biology one, Context7 on a topic
-with no matching library) is a real answer, not a whiff. If research still
+non-software topic or another source marked `SOURCE-MISMATCH`) is a real
+answer, not a whiff. Read every row in `### Source/lane status`; one combined
+verdict must not hide `THIN`, `QUERY-COLLISION`, `SOURCE-MISMATCH`,
+`INFRASTRUCTURE`, or `CONFIG`. If a mechanical shortening still reports
+`QUERY-COLLISION`, use a semantic re-anchor with different terminology. If research still
 comes back empty after the retry protocol, start the dream stage unseeded
 rather than not at all. Keep the research-quality note in your own Step 6
 narration, never in the dream pool itself in Step 5, which stays

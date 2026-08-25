@@ -11,7 +11,7 @@ Print everything below the `---OUTPUT---` line verbatim as your response. Do not
 
 ## code-quorum — quick reference
 
-`code-quorum v0.0.64`
+`code-quorum v0.0.65`
 
 ### Modes
 
@@ -22,7 +22,7 @@ Print everything below the `---OUTPUT---` line verbatim as your response. Do not
 | `q-skystorm <topic>` | Forward-research blue-sky. Map the cross-domain topology in the literature → dream → ground → synthesize. |
 | `q-validate <plan-path>` | Critical pushback on a draft plan. 2-round default; `--extended` = 4 rounds with stance rotation at R3. |
 | `q-review [target]` | Critical pushback on real code changes (branch/PR/range/whole codebase). Convergence into a findings table. `--scope <path>` bounds it; 2-round default, `--extended` = 4. |
-| `q-research <topic>` | Standalone prior-art digest (arXiv + OpenAlex + Europe PMC + Context7 + GitHub + HuggingFace) with links. No council — one call. `-s <source>` restricts; `--exploratory` for cross-domain analogy hunting. |
+| `q-research <topic>` | Standalone prior-art digest with semantic query lanes, per-source/lane status, OpenAlex methods/currency purpose, and separate published/preprint Europe PMC sources. No council — one call. `-s <source>` restricts; `--exploratory` hunts cross-domain analogies. |
 
 ### Invocation
 

@@ -27,7 +27,8 @@ most promising threads supportively, and then converges on validation paths.
 `$ARGUMENTS` is the topic, optionally with flags:
 
 - `--no-research`: skip structurally portable prior art from arXiv, OpenAlex,
-  Europe PMC, Context7, GitHub, and HuggingFace. Research is the default.
+  Europe PMC published/preprints, Context7, GitHub, and HuggingFace. Research
+  is the default.
 - `--verbose`: lift terse output caps. Default is terse.
 
 Strip both flags from the topic. If nothing remains, ask what the user wants to
@@ -46,8 +47,8 @@ through another tool or shell path. External seats are read-only and must not
 edit files or run commands.
 
 Unless `--no-research` was passed, invoking this skill also approves sending a
-topic-derived query to the public research backends: arXiv, OpenAlex, Europe
-PMC, Context7, GitHub, and HuggingFace.
+topic-derived query lanes to the public research backends: arXiv, OpenAlex,
+Europe PMC published/preprints, Context7, GitHub, and HuggingFace.
 
 ## Step 1: Write independent host ideas
 
@@ -66,6 +67,8 @@ use different `mode` values:
   more domain terms. Grounded mode makes an off-topic home-domain result
   `RETRY-RECOMMENDED`, so fix the anchor before harvesting from it. The overlap
   check needs three papers; with one or two, inspect the titles before harvest.
+  Form 2–3 semantic `query_lanes` (domain/construct, failure/validity, and
+  review/guideline terminology) and use `purpose="methods"`.
 - **Harvest.** From returned anchor abstracts, choose one or two recurring
   method terms that were not in the query: a named algorithm, transform, or
   update rule, never a bare word. The method layer is what transfers across
@@ -88,6 +91,10 @@ terms for an un-shortenable query. `LOW-OVERLAP` is expected for a pivot;
 `CONFIG` is a key/access problem. Internal retry notes (`↻`) record a recovered
 first-attempt failure. A domain-legitimate zero is evidence, not a whiff. If
 research remains empty after this protocol, start the dream stage unseeded.
+Read every row in `### Source/lane status`: `ON-TOPIC`, `THIN`,
+`QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`. Use one
+mechanical shortening at most; a repeated `QUERY-COLLISION` requires a semantic
+re-anchor with different terminology.
 
 Read results for portable structure, not literal precedent. A far-flung hit is
 the find when it shares structural kinship: a transferable data shape or

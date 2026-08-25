@@ -301,10 +301,46 @@ def test_research_help_lists_source_and_limit():
     plain = " ".join(_plain(result.stdout).replace("│", " ").split())
     assert "--source" in plain
     assert "--limit" in plain
+    assert "--purpose" in plain
+    assert "--query-lane" in plain
     # Pin the full source contract so a dropped source or a stale count (the
     # "all five" that omitted Europe PMC) fails here instead of drifting.
-    assert "arxiv, openalex, europepmc, context7, github, huggingface" in plain
-    assert "Default: all six." in plain
+    assert "europepmc-published" in plain
+    assert "europepmc-preprints" in plain
+    assert "Default: all seven." in plain
+
+
+def test_research_cli_passes_purpose_and_query_lanes(monkeypatch):
+    import quorum.cli as cli
+    from quorum.research import ResearchDigest
+
+    seen = {}
+
+    async def fake_research_topic(topic, **kw):
+        seen.update(kw)
+        return ResearchDigest(topic=topic, papers=())
+
+    monkeypatch.setattr(cli, "research_topic", fake_research_topic)
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "execution provenance",
+            "--purpose",
+            "currency",
+            "--query-lane",
+            "computational experiment provenance",
+            "--query-lane",
+            "minimum information reporting provenance",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen["purpose"] == "currency"
+    assert seen["query_lanes"] == (
+        "computational experiment provenance",
+        "minimum information reporting provenance",
+    )
 
 
 def test_q_research_is_reserved_for_host_skills() -> None:

@@ -438,6 +438,26 @@ def test_q_research_skill_names_sync_tool_and_keeps_retry_protocol() -> None:
     assert "domain-specific terms" in flat
 
 
+def test_q_research_skill_requires_semantic_lanes_and_per_lane_statuses() -> None:
+    text = _skill("q-research")
+    flat = " ".join(text.split())
+
+    assert "query_lanes" in text
+    assert "purpose" in text
+    assert "methods" in text and "currency" in text
+    for status in (
+        "ON-TOPIC",
+        "THIN",
+        "QUERY-COLLISION",
+        "SOURCE-MISMATCH",
+        "INFRASTRUCTURE",
+        "CONFIG",
+    ):
+        assert status in text
+    assert "semantic re-anchor" in flat
+    assert "mechanical shortening" in flat
+
+
 def test_q_skystorm_skill_allows_absent_suggested_query() -> None:
     """Round-3 q-review: q-brainstorm was updated so RETRY-RECOMMENDED may carry
     no suggestion, but q-skystorm still claimed every retry carries one -- an

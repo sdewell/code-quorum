@@ -52,6 +52,7 @@ from .orchestration import (
 )
 from .research import (
     DEFAULT_SOURCES,
+    RESEARCH_PURPOSES,
     compute_status,
     format_digest,
     research_topic,
@@ -196,8 +197,8 @@ ResearchOption = Annotated[
     typer.Option(
         "--research/--no-research",
         help="Ground the run in a prior-art digest (arXiv + OpenAlex + Europe PMC "
-        "+ Context7 + GitHub + HuggingFace): research runs first, the digest is "
-        "printed and seeded into the council prompt as evidence. Default: on.",
+        "published/preprints + Context7 + GitHub + HuggingFace): research runs "
+        "first, then the digest is printed and seeded as evidence. Default: on.",
     ),
 ]
 HostOption = Annotated[
@@ -451,19 +452,41 @@ def research(
         typer.Option(
             "--source",
             "-s",
-            help="Source to query (repeatable): arxiv, openalex, europepmc, "
-            "context7, github, huggingface. Default: all six.",
+            help="Source to query (repeatable): arxiv, openalex, "
+            "europepmc-published, europepmc-preprints, context7, github, "
+            "huggingface. Default: all seven.",
         ),
     ] = None,
     limit: Annotated[
         int, typer.Option("--limit", help="Max results per source.", min=1)
     ] = 5,
+    purpose: Annotated[
+        str,
+        typer.Option(
+            "--purpose",
+            help=f"Search purpose: {' or '.join(RESEARCH_PURPOSES)}.",
+        ),
+    ] = "methods",
+    query_lanes: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--query-lane",
+            help="Semantic query lane (repeatable, up to three).",
+        ),
+    ] = None,
 ) -> None:
-    """Fetch prior art from arXiv, OpenAlex, Europe PMC, Context7, GitHub, and
-    HuggingFace."""
+    """Fetch prior art from publication and artifact sources."""
     chosen = _bp(validate_sources, sources if sources else DEFAULT_SOURCES)
     try:
-        digest = asyncio.run(research_topic(topic, sources=chosen, limit=limit))
+        digest = asyncio.run(
+            research_topic(
+                topic,
+                sources=chosen,
+                limit=limit,
+                purpose=purpose,
+                query_lanes=tuple(query_lanes) if query_lanes else None,
+            )
+        )
     except ValueError as exc:
         # A generic/empty topic is refused by the pre-flight lint; surface it as a
         # clean bad-parameter message, not a traceback.
