@@ -1609,6 +1609,36 @@ def test_build_command_rejects_arbitrary_fallback_workspace() -> None:
         )
 
 
+def test_quota_fallback_add_dir_widens_reads_not_writes(tmp_path: Path) -> None:
+    # --add-dir only widens agy's own workspace scope (permission grant), never
+    # the seatbelt's write allowlist -- build_sandbox_profile doesn't even take
+    # extra_add_dir as a parameter, so the staged fallback dir can never earn a
+    # file-write* allow. The kernel-level (deny file-write*) must still hold.
+    home = tmp_path / "home"
+    ws = home / "Code" / "proj"
+    ws.mkdir(parents=True)
+
+    with gc._quota_fallback_handoff("prompt") as (_instruction, request_path):
+        fallback_dir = request_path.parent
+
+        cmd = GeminiCliAgent().build_command(
+            prompt="x",
+            cwd=str(ws),
+            sandbox_profile="/tmp/p.sb",
+            extra_add_dir=str(fallback_dir),
+        )
+        add_dirs = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--add-dir"]
+        assert str(fallback_dir) in add_dirs
+
+        profile = gc.build_sandbox_profile(cwd=str(ws), home=home)
+        assert "(deny file-write*)" in profile
+        write_section = "\n".join(
+            line for line in profile.splitlines() if "file-write" in line
+        )
+        assert str(fallback_dir) not in write_section
+        assert "/tmp" not in write_section  # also catches /private/tmp
+
+
 def test_run_quota_reflex_composes_with_transient_retry(monkeypatch, tmp_path) -> None:
     # A 429-poisoned startup crash retries once on the SAME model first (it is
     # usually transient); only when that retry also dies with quota evidence

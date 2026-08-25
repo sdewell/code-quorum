@@ -87,10 +87,8 @@ def test_auth_check_claude_host_uses_direct_zero_quota_probe(
 
     monkeypatch.setattr(cli_mod, "GeminiCliAgent", _Gemini)
 
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        result = runner.invoke(
-            app, ["auth-check", "--seat", "gemini", "--host", "claude"]
-        )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["auth-check", "--seat", "gemini", "--host", "claude"])
 
     assert result.exit_code == 0
     assert result.output.strip() == "agy authentication is ready"
@@ -108,10 +106,8 @@ def test_auth_check_codex_host_uses_out_of_sandbox_helper(
 
     monkeypatch.setattr(cli_mod, "run_gemini_auth_check_via_helper", _check)
 
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        result = runner.invoke(
-            app, ["auth-check", "--seat", "gemini", "--host", "codex"]
-        )
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["auth-check", "--seat", "gemini", "--host", "codex"])
 
     assert result.exit_code == 0
     assert result.output.strip() == "agy authentication is ready"
@@ -130,8 +126,8 @@ def test_auth_check_honors_configured_runtime_host_when_flag_is_omitted(
     monkeypatch.setenv("CODE_QUORUM_HOST", "codex")
     monkeypatch.setattr(cli_mod, "run_gemini_auth_check_via_helper", _check)
 
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        result = runner.invoke(app, ["auth-check", "--seat", "gemini"])
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["auth-check", "--seat", "gemini"])
 
     assert result.exit_code == 0
     assert seen["cwd"]

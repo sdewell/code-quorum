@@ -66,8 +66,6 @@ stamp="${installed}|${pinned}|$(date +%F)"
 if [[ "$(cat "$stamp_file" 2>/dev/null || true)" == "$stamp" ]]; then
   exit 0
 fi
-mkdir -p "$stamp_dir" 2>/dev/null || true
-printf '%s' "$stamp" 2>/dev/null > "$stamp_file" || true
 
 if [[ -e "${root}/.git" && -f "${root}/scripts/verify-agy-seat.sh" ]]; then
   remedy="  bash \"${root}/scripts/verify-agy-seat.sh\""
@@ -83,7 +81,8 @@ else
   Codex marketplace artifact so this hook receives the updated verified pin."
 fi
 
-cat <<EOF
+notice=""
+IFS= read -r -d '' notice <<EOF || true
 [code-quorum] agy is v${installed} but the gemini seat's read-only sandbox was
 last live-verified against v${pinned}. The seatbelt still applies and fails
 closed; whether it still contains everything this agy version can attempt is
@@ -92,3 +91,43 @@ quota (~2 min), so it is opt-in and never runs automatically:
 ${remedy}
 (This notice is free and repeats at most once a day until the versions match.)
 EOF
+
+# Codex hook stdout is strict JSON-or-silent. Claude accepts the same
+# hookSpecificOutput envelope. Encode in Bash so this safety notice does not
+# add a cold uv/Python startup inside the hook's 10-second budget.
+json_escape() {
+  local value="$1"
+  local result=""
+  local char code escaped i
+  local LC_ALL=C
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      '"') result+='\"' ;;
+      \\) result+='\\' ;;
+      $'\b') result+='\b' ;;
+      $'\f') result+='\f' ;;
+      $'\n') result+='\n' ;;
+      $'\r') result+='\r' ;;
+      $'\t') result+='\t' ;;
+      *)
+        printf -v code '%d' "'$char"
+        if ((code < 32)); then
+          printf -v escaped '\\u%04x' "$code"
+          result+="$escaped"
+        else
+          result+="$char"
+        fi
+        ;;
+    esac
+  done
+  printf '%s' "$result"
+}
+escaped_notice="$(json_escape "$notice")"
+payload="{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"${escaped_notice}\"}}"
+
+# Claim delivery only after the complete JSON response was written to stdout.
+# If stdout fails, a later session gets another chance to warn.
+printf '%s\n' "$payload"
+mkdir -p "$stamp_dir" 2>/dev/null || true
+printf '%s' "$stamp" 2>/dev/null > "$stamp_file" || true

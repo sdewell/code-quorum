@@ -937,6 +937,9 @@ def _quota_fallback_handoff(prompt: str) -> Iterator[tuple[str, Path]]:
     Gemini bucket is exhausted, that hook returns 429 and strands the otherwise
     available Claude/GPT quota. A short prompt avoids the hook; the Claude model
     then reads the unchanged request through its normal read_file tool.
+
+    `--add-dir` widens only agy's own read scope; the seatbelt's global
+    `(deny file-write*)` still applies to the staged directory.
     """
     with tempfile.TemporaryDirectory(
         prefix=_AGY_FALLBACK_TEMP_PREFIX,

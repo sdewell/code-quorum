@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -125,6 +127,25 @@ def test_verify_expands_tilde_config_path(
     monkeypatch.setenv("HOME", str(tmp_path))
 
     assert verifier.approval_errors(Path("~/.codex/config.toml")) == []
+
+
+def test_run_outside_code_quorum_environment_reports_clean_error() -> None:
+    # -S skips site-packages, so `quorum` is not importable -- reproduces
+    # running the script with a bare/non-venv interpreter instead of `uv run`.
+    # Must fail with a clean instruction on stderr and exit 2, not an opaque
+    # ModuleNotFoundError traceback.
+    result = subprocess.run(
+        [sys.executable, "-S", str(_SCRIPT), "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert (
+        "verify_codex_approvals.py must run inside the code-quorum environment: "
+        f"uv run --directory {_ROOT} python scripts/verify_codex_approvals.py"
+        in result.stderr
+    )
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_workshop_release_runbook_owns_github_install_verification() -> None:

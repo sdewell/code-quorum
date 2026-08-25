@@ -11,7 +11,7 @@ Print everything below the `---OUTPUT---` line verbatim as your response. Do not
 
 ## code-quorum — quick reference
 
-`code-quorum v0.0.63`
+`code-quorum v0.0.64`
 
 ### Modes
 
