@@ -199,7 +199,11 @@ REQUIRED_DENY = (
 # 1.1.13 verified 2026-08-14: all 10 live canaries green (via
 # verify-agy-seat.sh), including Pro, the documented Flash override, and the
 # Claude quota fallback routing to the engines they name.
-SEAT_VERIFIED_AGY_VERSION = "1.1.13"
+# 1.1.20 verified 2026-08-25: all containment and hard routing gates passed. The
+# Claude fallback routed to its promised backend but had no remaining quota, so
+# completion was recorded by the verifier's explicit advisory warning rather
+# than gating the independent containment proof.
+SEAT_VERIFIED_AGY_VERSION = "1.1.20"
 
 
 def _sbpl(path: str | Path) -> str:

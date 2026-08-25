@@ -2412,6 +2412,7 @@ def test_factory_sdk_backend_without_gemini_record_is_silent(
 import os  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import warnings  # noqa: E402
 
 
 def _live_gate() -> bool:
@@ -2424,6 +2425,68 @@ def _live_gate() -> bool:
 
 
 _LIVE_REASON = "live: needs CODE_QUORUM_AGY_E2E=1, agy on PATH, login, read-only config"
+
+
+def _fallback_quota_is_advisory(
+    *,
+    model: str,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    run_log: Path,
+) -> bool:
+    """The one availability failure that does not invalidate containment."""
+    return (
+        model == gc.AGY_QUOTA_FALLBACK_MODEL
+        and returncode == 1
+        and not stdout
+        and gc.AGY_EXPLICIT_QUOTA_ERROR_MARKER in stderr
+        and gc._log_shows_quota_exhaustion(run_log)
+    )
+
+
+def test_fallback_quota_is_the_only_advisory_case(tmp_path: Path) -> None:
+    quota_log = tmp_path / "quota.log"
+    _write_quota_log(quota_log)
+    clean_log = tmp_path / "clean.log"
+    clean_log.write_text("clean\n", encoding="utf-8")
+
+    assert _fallback_quota_is_advisory(
+        model=gc.AGY_QUOTA_FALLBACK_MODEL,
+        returncode=1,
+        stdout="",
+        stderr="Error: Individual quota reached. Resets later.",
+        run_log=quota_log,
+    )
+    rejected = (
+        (gc.DEFAULT_MODEL, 1, "", "Individual quota reached", quota_log),
+        (
+            gc.AGY_QUOTA_FALLBACK_MODEL,
+            1,
+            "model-authored output",
+            "Individual quota reached",
+            quota_log,
+        ),
+        (gc.AGY_QUOTA_FALLBACK_MODEL, 1, "", "unrelated failure", quota_log),
+        (
+            gc.AGY_QUOTA_FALLBACK_MODEL,
+            1,
+            "",
+            "Individual quota reached",
+            clean_log,
+        ),
+        (gc.AGY_QUOTA_FALLBACK_MODEL, 0, "OK", "", quota_log),
+    )
+    assert not any(
+        _fallback_quota_is_advisory(
+            model=model,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+            run_log=run_log,
+        )
+        for model, returncode, stdout, stderr, run_log in rejected
+    )
 
 
 # `agy models` may look like a local listing, but the CLI starts a local listener
@@ -2673,7 +2736,9 @@ def test_live_denylist_survives_agy_normalization(tmp_path: Path) -> None:
 # Scope, stated so nobody reads more into a green canary than it proves: this
 # drives build_command's argv through subprocess directly, NOT the seat's async
 # run(). What it proves is agy's resolver -- the id we send reaches the engine it
-# names, and the turn completes. It deliberately does not exercise run()'s
+# names. Primary and Flash turns must also complete; explicit quota exhaustion
+# on the optional Claude fallback is a warning after its route is proven. It
+# deliberately does not exercise run()'s
 # preflight, transient retry, or quota reflex, each of which has its own
 # deterministic tests; run() passes self.model through untouched, so there is no
 # transformation between the two paths for this canary to miss.
@@ -2717,8 +2782,8 @@ def test_live_seat_models_route_to_expected_backend(tmp_path: Path, model: str) 
         f"log line changed shape -- re-check {gc._AGY_BACKEND_LABEL_RE.pattern!r} "
         "against a fresh log before trusting any routing claim."
     )
-    # Assert on the WHOLE attempt, not just the first decision: a run that starts
-    # on the right engine and switches is still not the model we promised.
+    # Assert routing before the availability exception: quota can never waive a
+    # missing or wrong backend label.
     assert set(labels) == {expected}, (
         f"agy routed --model {model!r} to {sorted(set(labels))} instead of "
         f"{expected!r}. This is the silent-substitution bug again: the id is "
@@ -2727,12 +2792,20 @@ def test_live_seat_models_route_to_expected_backend(tmp_path: Path, model: str) 
         "check both against agy's log) and repin DEFAULT_MODEL / "
         "AGY_QUOTA_FALLBACK_MODEL to it."
     )
-    # Routing is logged BEFORE the turn runs, so the labels above only prove the
-    # right engine was selected -- not that it served an answer. Assert the turn
-    # completed too, or a model that resolves and then 404s reads as green.
-    # Ordered after the label asserts on purpose: a mismatch is a routing bug, a
-    # bad exit on matching labels is a live-service problem, and the messages
-    # should not be able to blame each other.
+    if _fallback_quota_is_advisory(
+        model=model,
+        returncode=proc.returncode,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        run_log=run_log,
+    ):
+        warnings.warn(
+            f"optional fallback {model!r} routed correctly but could not answer "
+            "because its quota is exhausted",
+            UserWarning,
+            stacklevel=1,
+        )
+        return
     assert proc.returncode == 0, (
         f"--model {model!r} routed correctly to {expected!r} but the turn failed "
         f"(rc {proc.returncode}): {(proc.stdout + proc.stderr)[-400:]}"
