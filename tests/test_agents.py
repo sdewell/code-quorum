@@ -522,6 +522,21 @@ def test_build_opencode_config_openrouter_pins_throughput() -> None:
     assert model_cfg["options"]["provider"] == {"sort": "throughput"}
 
 
+def test_build_opencode_config_v4_flash_pins_provider_order() -> None:
+    # Throughput sort lands V4 Flash on SiliconFlow, where the model thinks
+    # ~5.6K reasoning tokens per turn (52s median, 85s max); Novita/Parasail
+    # serve the same model at ~0.7-1.1K reasoning tokens (9-17s). An explicit
+    # order keeps the seat on the fast backends; fallbacks stay on so an
+    # unavailable backend degrades to the next instead of failing the seat.
+    cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4-flash")
+    assert cfg is not None
+    model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4-flash"]
+    assert model_cfg["options"]["provider"] == {
+        "order": ["novita", "parasail", "siliconflow"],
+        "allow_fallbacks": True,
+    }
+
+
 def test_build_opencode_config_arms_opencodes_own_stream_watchdog() -> None:
     # opencode ships wrapSSE but only arms it when a provider sets chunkTimeout,
     # and there is no default on the openai-compatible path OpenRouter uses

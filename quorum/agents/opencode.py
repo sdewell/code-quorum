@@ -261,16 +261,45 @@ def _resolve_openrouter_key(environ: dict[str, str] | None = None) -> str | None
 _OPENROUTER_PREFIX = "openrouter/"
 
 
+# Per-model OpenRouter provider routing. Default is throughput-sorted: it keeps
+# the council off backends that win OpenRouter's "lowest latency" (first-token)
+# ranking but complete slowly -- Parasail served deepseek-v4-pro at 394s total /
+# 324s to first content, vs 56s on Fireworks.
+#
+# V4 Flash is pinned to an explicit order instead. Measured 2026-08-27 (same
+# ~10K-token review prompt, 6 pinned requests per backend): how long the model
+# THINKS is a backend trait, and the throughput sort was landing every council
+# turn on SiliconFlow -- highest tokens/sec, but a median 5.6K reasoning tokens
+# per turn (max 10.6K) for a 52s median / 85s max turn. Novita: 0.7K reasoning
+# tokens, 8.7s median / 12s max. Parasail: 1.1K, 17s / 21s. In production the
+# tail was the whole problem: 3,200 council steps over 45 days showed steps with
+# >5K reasoning tokens at 82s average and 100% over 30s, and every idle-timeout
+# loss (OPENCODE_IDLE_TIMEOUT_S) was one of those turns. Reasoning-effort and
+# reasoning-budget request params are accepted but not enforced on SiliconFlow
+# (probed), so ordering backends is the lever. DeepInfra and DigitalOcean were
+# faster still but returned zero reasoning tokens (no thinking phase) -- left
+# out until review quality without thinking is checked. Fallbacks stay on so
+# an unavailable backend degrades to the next rather than failing the seat.
+_PROVIDER_ORDER: dict[str, list[str]] = {
+    "deepseek/deepseek-v4-flash": ["novita", "parasail", "siliconflow"],
+}
+
+
+def _provider_routing(model_id: str) -> dict:
+    order = _PROVIDER_ORDER.get(model_id)
+    if order is None:
+        return {"sort": "throughput"}
+    return {"order": list(order), "allow_fallbacks": True}
+
+
 def _build_opencode_config(model: str) -> dict | None:
     """Build the sandbox opencode.json for an OpenRouter model. Two pins:
 
-    1. Throughput-sorted provider routing so the council avoids backends that
-       win OpenRouter's "lowest latency" (first-token) ranking but complete
-       slowly -- e.g. Parasail served deepseek-v4-pro at 394s total / 324s to
-       first content, vs 56s on Fireworks. opencode forwards `options.provider`
-       verbatim as OpenRouter's provider-routing object (verified end-to-end).
-       The model id is keyed without the "openrouter/" prefix (opencode's
-       per-provider id).
+    1. Provider routing (_provider_routing): an explicit backend order for
+       models we have measured, throughput-sorted routing otherwise. opencode
+       forwards `options.provider` verbatim as OpenRouter's provider-routing
+       object (verified end-to-end). The model id is keyed without the
+       "openrouter/" prefix (opencode's per-provider id).
     2. `small_model` (DEFAULT_SMALL_MODEL) so opencode's auxiliary title/
        summarize/classify calls bill a known cheap model instead of the Haiku
        its regex auto-selects in this OpenRouter-only sandbox (see the constant).
@@ -285,7 +314,9 @@ def _build_opencode_config(model: str) -> dict | None:
         "provider": {
             "openrouter": {
                 "options": {"chunkTimeout": OPENROUTER_CHUNK_TIMEOUT_MS},
-                "models": {model_id: {"options": {"provider": {"sort": "throughput"}}}},
+                "models": {
+                    model_id: {"options": {"provider": _provider_routing(model_id)}}
+                },
             }
         },
     }
@@ -301,7 +332,7 @@ def _ensure_sandbox_home(
     scans BOTH `$HOME/.config/opencode/` and the legacy `$HOME/.opencode/`
     layout. Leaves data/cache/state alone (those are runtime artifacts
     opencode writes inside the sandbox). When `model` is an OpenRouter model,
-    also writes opencode.json pinning throughput-sorted provider routing (see
+    also writes opencode.json pinning provider routing (see
     _build_opencode_config); model-less callers (test/utility harnesses) get
     council.md only."""
     _ensure_private_dir(sandbox, parents=True)

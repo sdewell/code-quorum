@@ -1,12 +1,8 @@
 name: CI
 
+# pull_request only: squash-merge lands the exact tree the PR run tested, so a
+# post-merge push run would be a duplicate.
 on:
-  push:
-    branches: [main]
-    # The LEARNINGS corpus is auto-committed/pushed to main by the SessionStart
-    # learnings hook; CI shouldn't run on a docs-only snapshot. Real code pushes
-    # still trigger it (and PRs always run the pull_request job below).
-    paths-ignore: ['LEARNINGS*.md', '*-PORTABLE-LEARNINGS.md', '.gitattributes']
   pull_request:
     branches: [main]
 
