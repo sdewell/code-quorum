@@ -37,6 +37,12 @@ GEMINI_NO_KEY_RC = 2
 # Returncode when the SDK Python package isn't importable.
 GEMINI_NO_SDK_RC = 127
 
+# Returncode when cwd sits under a hidden directory and the widened workspace
+# would reach $HOME -- the SDK backend has no sandbox to fence that read
+# scope, unlike the seatbelted CLI path's check_sandbox_cwd. Mirrors
+# GEMINI_CLI_NO_SANDBOX_RC's value in gemini_cli.py (same class of refusal).
+GEMINI_UNSAFE_CWD_RC = 4
+
 # Returncode when the agent exits cleanly but produces no answer text -- the
 # model ended its turn with only whitespace. A blank "success" silently
 # vanishes at the orchestrator (run_council drops agents whose output is empty)
@@ -103,7 +109,9 @@ class GeminiAgent(Agent):
         the safety contract, asserted by tests. When ``cwd`` is (or sits under) a
         hidden directory, the workspace is widened to the nearest non-hidden
         ancestor -- the harness rejects a hidden workspace root outright; see
-        ``_non_hidden_workspace``."""
+        ``_non_hidden_workspace``. Callers must reject a cwd whose widened
+        workspace would reach $HOME before calling this (see ``run``); this
+        method stays pure and does not itself refuse that case."""
         from google.antigravity import (
             BuiltinTools,
             CapabilitiesConfig,
@@ -133,6 +141,38 @@ class GeminiAgent(Agent):
                 returncode=GEMINI_NO_KEY_RC,
                 duration_s=time.monotonic() - start,
                 unavailable_reason="authentication",
+            )
+
+        workspace = _non_hidden_workspace(cwd)
+        home = Path.home().resolve()
+        try:
+            home.relative_to(Path(workspace).resolve())
+        except ValueError:
+            pass
+        else:
+            if workspace != cwd:
+                cause = (
+                    f"cwd {cwd} sits under a hidden directory, so the "
+                    f"Antigravity workspace would widen to {workspace} -- "
+                    "the whole home directory."
+                )
+            else:
+                cause = (
+                    f"cwd {cwd} is the home directory or one of its "
+                    "ancestors, so the Antigravity workspace would be the "
+                    "whole home directory."
+                )
+            return AgentResult(
+                agent=self.name,
+                output="",
+                error=(
+                    f"{cause} The SDK backend has no sandbox to fence that. "
+                    "Run from a repository under a non-hidden project path, "
+                    "or use the default agy CLI backend on macOS."
+                ),
+                returncode=GEMINI_UNSAFE_CWD_RC,
+                duration_s=time.monotonic() - start,
+                unavailable_reason="sandbox",
             )
 
         try:

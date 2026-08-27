@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
-from .agents.seat_helper import active_allowed_roots
+from .agents.seat_helper import active_allowed_roots, legacy_default_allowed_roots
 
 PLUGIN_ID = "code-quorum@code-quorum"
 MARKETPLACE_NAME = "code-quorum"
@@ -250,12 +250,23 @@ def perform_codex_update(
         else Path.home() / ".codex" / "config.toml"
     )
     approvals_before = approval_snapshot(approvals)
-    roots = tuple(
-        path.expanduser().resolve()
-        for path in (
-            allowed_roots if allowed_roots is not None else active_allowed_roots()
+    if allowed_roots is None:
+        live_roots = tuple(
+            path.expanduser().resolve() for path in active_allowed_roots()
         )
-    )
+        if set(live_roots) == set(legacy_default_allowed_roots()):
+            # The running helper is still on the pre-upgrade two-root
+            # default. Forward nothing so the reinstall picks up
+            # default_allowed_roots() -- including any new default root --
+            # instead of freezing the old pair in place. A helper that was
+            # installed with exactly that pair passed explicitly is
+            # indistinguishable and is treated the same way: nothing it
+            # allowed is lost; it gains the new default root.
+            roots: tuple[Path, ...] = ()
+        else:
+            roots = live_roots
+    else:
+        roots = tuple(path.expanduser().resolve() for path in allowed_roots)
 
     _run_step(
         "Refreshing stable checkout",

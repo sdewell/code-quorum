@@ -123,10 +123,14 @@ the selected `cwd` under the user's configured provider accounts.
 Every repository-reading MCP council start requires an explicit absolute `cwd` and
 rejects an omitted or blank value before a job is created. The MCP server's own
 plugin-cache or runtime directory is never used as project context. The selected
-directory must be under `CODE_QUORUM_HELPER_ALLOWED_ROOTS` (`~/Code` and `~/src`
-by default). Plan and scope documents must resolve inside that `cwd`; absolute
+directory must be under `CODE_QUORUM_HELPER_ALLOWED_ROOTS` (`~/Code`, `~/src`,
+and `~/.codex/agent-worktrees` — a common agent-worktree location — by
+default).
+Plan and scope documents must resolve inside that `cwd`; absolute
 paths, `..` escapes, and symlink escapes are rejected before their contents are
-read.
+read. Because a `cwd` under `~/.codex/agent-worktrees` is hidden, the Gemini
+SDK backend would otherwise widen its workspace to the home directory with no
+sandbox to fence that read scope; it refuses to run for such a `cwd` instead.
 
 A bare `q-review` compares the branch with the default-branch merge-base and
 includes committed work, uncommitted tracked changes, and a list of untracked

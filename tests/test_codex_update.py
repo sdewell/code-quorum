@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from quorum import codex_update as codex_update_mod
+from quorum.agents.seat_helper import legacy_default_allowed_roots
 from quorum.codex_update import (
     APPROVED_TOOLS,
     CodexUpdateError,
@@ -138,6 +140,55 @@ def test_update_codex_runs_one_approval_preserving_sequence(tmp_path: Path) -> N
         ],
     ]
     assert all("plugin remove" not in " ".join(command) for command in calls)
+
+
+def test_update_codex_omits_allowed_root_flags_when_live_roots_are_legacy_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A helper still running under the pre-upgrade two-root default must not
+    # have that legacy pair re-forwarded as explicit --allowed-root flags --
+    # doing so would freeze it there and the new default root would never
+    # apply after the reinstall.
+    root = tmp_path / "code-quorum"
+    root.mkdir()
+    _write_project(root)
+    config = tmp_path / "config.toml"
+    _write_approvals(config)
+    calls: list[list[str]] = []
+    legacy = legacy_default_allowed_roots()
+    monkeypatch.setattr(codex_update_mod, "active_allowed_roots", lambda: legacy)
+
+    perform_codex_update(
+        root, config_path=config, allowed_roots=None, run=_runner(calls)
+    )
+
+    install_call = next(
+        call for call in calls if "install-seat-helper-launchagent" in call
+    )
+    assert "--allowed-root" not in install_call
+
+
+def test_update_codex_forwards_custom_live_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "code-quorum"
+    root.mkdir()
+    _write_project(root)
+    config = tmp_path / "config.toml"
+    _write_approvals(config)
+    calls: list[list[str]] = []
+    custom = (tmp_path / "work",)
+    monkeypatch.setattr(codex_update_mod, "active_allowed_roots", lambda: custom)
+
+    perform_codex_update(
+        root, config_path=config, allowed_roots=None, run=_runner(calls)
+    )
+
+    install_call = next(
+        call for call in calls if "install-seat-helper-launchagent" in call
+    )
+    assert install_call.count("--allowed-root") == 1
+    assert str((tmp_path / "work").resolve()) in install_call
 
 
 def test_update_codex_preserves_the_users_approval_choices(tmp_path: Path) -> None:

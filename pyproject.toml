@@ -1,6 +1,6 @@
 [project]
 name = "code-quorum"
-version = "0.0.66"
+version = "0.0.67"
 description = "Multi-agent council for Claude Code and Codex"
 readme = "README.md"
 requires-python = ">=3.13"

@@ -74,6 +74,22 @@ def default_allowed_roots() -> tuple[Path, ...]:
             if part.strip()
         )
     home = Path.home()
+    return (
+        (home / "Code").resolve(),
+        (home / "src").resolve(),
+        (home / ".codex" / "agent-worktrees").resolve(),
+    )
+
+
+def legacy_default_allowed_roots() -> tuple[Path, ...]:
+    """The two-root default set before ~/.codex/agent-worktrees was added.
+
+    A helper installed under those old defaults reports live roots of
+    exactly this pair; ``update-codex`` uses this to detect "still on
+    defaults" and avoid freezing it in place -- see
+    ``codex_update.perform_codex_update``.
+    """
+    home = Path.home()
     return ((home / "Code").resolve(), (home / "src").resolve())
 
 

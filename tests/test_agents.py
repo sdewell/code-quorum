@@ -331,6 +331,88 @@ def test_gemini_run_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.output == ""
 
 
+def test_gemini_run_refuses_hidden_cwd_that_widens_to_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A cwd under ~/.codex/agent-worktrees is hidden -- _non_hidden_workspace
+    # widens it to $HOME, and the SDK backend has no sandbox to fence that.
+    # run() must refuse before the SDK is ever imported/called.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    cwd = tmp_path / ".codex" / "agent-worktrees" / "o" / "r"
+    cwd.mkdir(parents=True)
+
+    import sys
+
+    monkeypatch.setitem(sys.modules, "google.antigravity", None)
+
+    result = asyncio.run(GeminiAgent().run(prompt="x", cwd=str(cwd)))
+
+    assert result.returncode != 0
+    assert str(tmp_path) in result.error
+    assert "home directory" in result.error
+    assert result.output == ""
+
+
+def test_gemini_run_nonhidden_cwd_does_not_hit_home_widening_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A non-hidden cwd must not trip the new guard. Stand in a fake
+    # google.antigravity module so this stays offline: the fake Agent raises
+    # immediately on entry, standing in for "fails later at the SDK stage".
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    cwd = tmp_path / "Code" / "proj"
+    cwd.mkdir(parents=True)
+
+    import sys
+    import types
+
+    class _FakeBuiltinTools:
+        VIEW_FILE = "view_file"
+        CREATE_FILE = "create_file"
+        EDIT_FILE = "edit_file"
+        RUN_COMMAND = "run_command"
+
+        @staticmethod
+        def read_only():
+            return frozenset({"view_file"})
+
+    class _FakeCapabilitiesConfig:
+        def __init__(self, enabled_tools):
+            self.enabled_tools = enabled_tools
+
+    class _FakeLocalAgentConfig:
+        def __init__(self, **kwargs):
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class _FakeAgent:
+        def __init__(self, config):
+            self.config = config
+
+        async def __aenter__(self):
+            raise RuntimeError("fake SDK stage reached -- no network involved")
+
+        async def __aexit__(self, *_exc_info):
+            return False
+
+    fake_module = types.ModuleType("google.antigravity")
+    for attr, value in {
+        "Agent": _FakeAgent,
+        "BuiltinTools": _FakeBuiltinTools,
+        "CapabilitiesConfig": _FakeCapabilitiesConfig,
+        "LocalAgentConfig": _FakeLocalAgentConfig,
+    }.items():
+        setattr(fake_module, attr, value)
+    monkeypatch.setitem(sys.modules, "google.antigravity", fake_module)
+
+    result = asyncio.run(GeminiAgent().run(prompt="x", cwd=str(cwd)))
+
+    assert "home directory" not in result.error
+    assert "fake SDK stage reached" in result.error
+
+
 @pytest.mark.live
 @pytest.mark.skipif(
     not os.environ.get("GEMINI_API_KEY"),

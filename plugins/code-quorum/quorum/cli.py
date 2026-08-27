@@ -568,7 +568,7 @@ def seat_helper(
             "--allowed-root",
             help=(
                 "Directory the helper may serve as a cwd (repeatable). "
-                "Default: ~/Code and ~/src."
+                "Default: ~/Code, ~/src, and ~/.codex/agent-worktrees."
             ),
         ),
     ] = None,
@@ -608,7 +608,7 @@ def install_seat_helper_launchagent(
             "--allowed-root",
             help=(
                 "Directory the helper may serve as a cwd (repeatable). "
-                "Default: ~/Code and ~/src."
+                "Default: ~/Code, ~/src, and ~/.codex/agent-worktrees."
             ),
         ),
     ] = None,

@@ -112,6 +112,58 @@ def test_active_allowed_roots_reads_live_helper_state(tmp_path: Path) -> None:
     assert sh.active_allowed_roots(spool) == (allowed.resolve(),)
 
 
+def test_default_allowed_roots_includes_worktrunk_worktree_root(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv(sh._ALLOWED_ROOTS_ENV, raising=False)
+
+    assert sh.default_allowed_roots() == (
+        (tmp_path / "Code").resolve(),
+        (tmp_path / "src").resolve(),
+        (tmp_path / ".codex" / "agent-worktrees").resolve(),
+    )
+
+
+def test_cwd_allowed_error_permits_worktrunk_worktree(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv(sh._ALLOWED_ROOTS_ENV, raising=False)
+    worktree = tmp_path / ".codex" / "agent-worktrees" / "sdewell" / "some-repo"
+    worktree.mkdir(parents=True)
+
+    assert sh.cwd_allowed_error(str(worktree), sh.default_allowed_roots()) is None
+
+
+def test_cwd_allowed_error_rejects_codex_siblings_of_agent_worktrees(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # ~/.codex/agent-worktrees is allowed, but that must not widen to its
+    # siblings under ~/.codex, or to ~/.codex itself -- those hold plugin
+    # cache and session state, not worktrees.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv(sh._ALLOWED_ROOTS_ENV, raising=False)
+    plugins_cache = tmp_path / ".codex" / "plugins" / "cache"
+    sessions = tmp_path / ".codex" / "sessions"
+    codex_dir = tmp_path / ".codex"
+    plugins_cache.mkdir(parents=True)
+    sessions.mkdir(parents=True)
+
+    roots = sh.default_allowed_roots()
+    for candidate in (plugins_cache, sessions, codex_dir):
+        assert sh.cwd_allowed_error(str(candidate), roots) is not None
+
+
+def test_default_allowed_roots_env_override_replaces_defaults(
+    monkeypatch, tmp_path: Path
+) -> None:
+    only_root = tmp_path / "only-allowed"
+    monkeypatch.setenv(sh._ALLOWED_ROOTS_ENV, str(only_root))
+
+    assert sh.default_allowed_roots() == (only_root.resolve(),)
+
+
 def test_helper_v1_is_rejected_after_auth_check_operation_was_added(
     tmp_path: Path,
 ) -> None:
