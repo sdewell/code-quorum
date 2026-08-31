@@ -216,33 +216,25 @@ def test_q_brainstorm_skill_demands_retry_before_fallback() -> None:
     keep the fallback escape hatch gated behind an actual reworked retry —
     guarding the 'research backend choked, I'll use what I know' shrug. The
     server now emits the verdict; the skill's job is to make the agent act on
-    RETRY-RECOMMENDED before falling back."""
+    RETRY-REQUIRED before falling back."""
     text = _skill("q-brainstorm")
     assert "Research status:" in text
-    assert "RETRY-RECOMMENDED" in text
+    assert "RETRY-REQUIRED" in text
     assert "call `q_research` again" in text
     assert "specific failure to avoid" in text
-    assert "reworked* retry has **also** failed" in text
+    assert "Research needs action: true" in text
+    assert "### Required research actions" in text
 
 
-def test_q_brainstorm_skill_allows_absent_suggested_query() -> None:
-    """Round-2/3 q-review: RETRY-RECOMMENDED no longer always carries a suggested
-    query (a total backend failure or an un-shortenable query yields none). The
-    skill must not tell the agent to resubmit a suggestion that may be absent --
-    it must branch on presence. And the two absent cases need OPPOSITE moves: an
-    infrastructure failure retries the SAME query (changing terms can't fix an
-    outage), an un-shortenable query re-anchors. A blanket 'don't resubmit the
-    identical query' was the round-3 contradiction -- pin both branches."""
+def test_q_brainstorm_skill_routes_required_action_table() -> None:
+    """Required actions must distinguish an unchanged infrastructure retry
+    from a semantic re-anchor without relying on prose hidden below OK."""
     text = _skill("q-brainstorm")
-    low = text.lower()
-    assert "usually" in low  # the suggestion is not guaranteed
-    assert "absent" in low  # the absent case is named
-    # And still mandates resubmitting when one IS present.
+    assert "Research needs action: true" in text
+    assert "### Required research actions" in text
+    assert "RETRY-SAME" in text
+    assert "RE-ANCHOR" in text
     assert "call `q_research` again" in text
-    # Both absent branches present, so the infra/re-anchor contradiction can't
-    # come back: retry the SAME query (infra) vs re-anchor (un-shortenable).
-    assert "same" in low
-    assert "re-anchor" in low
 
 
 def test_q_brainstorm_skill_demands_domain_anchored_query() -> None:
@@ -415,25 +407,21 @@ def test_q_skystorm_absence_from_field_map_is_inconclusive() -> None:
 def test_q_research_skill_names_sync_tool_and_keeps_retry_protocol() -> None:
     """q-research fronts the synchronous q_research tool directly — no
     start/await pair. It must name the exact plugin-prefixed tool, keep the
-    same verdict-keyed retry protocol as the storms (both absent-suggestion
-    branches, the fallback gated behind a reworked retry), and steer query
-    formation. This contract prevents drift outside the shared research
-    protocol."""
+    same verdict-keyed action protocol as the storms, and steer query formation.
+    This contract prevents drift outside the shared research protocol."""
     text = _skill("q-research")
     # Markdown hard-wraps at ~78 cols, so multi-word phrases may span a
     # newline+indent; normalize before phrase checks.
     flat = " ".join(text.split())
-    low = flat.lower()
     assert f"{_PREFIX}q_research" in text
     assert "Research status:" in text
-    assert "RETRY-RECOMMENDED" in text
+    assert "RETRY-REQUIRED" in text
     assert "specific failure to avoid" in flat
     assert "reworked retry has **also** failed" in flat
-    assert "usually" in low  # the suggested query is not guaranteed
-    assert "absent" in low  # the absent case is named
-    # Both absent branches: retry the SAME query (infra) vs re-anchor.
-    assert "same" in low
-    assert "re-anchor" in low
+    assert "Research needs action: true" in text
+    assert "### Required research actions" in text
+    assert "RETRY-SAME" in text
+    assert "RE-ANCHOR" in text
     assert "short is not the same as generic" in flat
     assert "domain-specific terms" in flat
 
@@ -458,18 +446,14 @@ def test_q_research_skill_requires_semantic_lanes_and_per_lane_statuses() -> Non
     assert "mechanical shortening" in flat
 
 
-def test_q_skystorm_skill_allows_absent_suggested_query() -> None:
-    """Round-3 q-review: q-brainstorm was updated so RETRY-RECOMMENDED may carry
-    no suggestion, but q-skystorm still claimed every retry carries one -- an
-    impossible instruction on a failed pivot. Skystorm must branch the same way,
-    and must NOT blanket-forbid an identical retry (wrong for infra failures)."""
+def test_q_skystorm_skill_routes_required_action_table() -> None:
+    """Skystorm must use the same explicit action routing as q-research and
+    q-brainstorm."""
     text = _skill("q-skystorm")
-    low = text.lower()
-    assert "usually" in low  # the suggestion is not guaranteed
-    assert "absent" in low  # the absent case is named
-    # Both absent branches: retry the SAME query (infra) vs re-anchor.
-    assert "same" in low
-    assert "re-anchor" in low
+    assert "Research needs action: true" in text
+    assert "### Required research actions" in text
+    assert "RETRY-SAME" in text
+    assert "RE-ANCHOR" in text
 
 
 def test_claude_skystorm_handles_a_degraded_dream_council() -> None:

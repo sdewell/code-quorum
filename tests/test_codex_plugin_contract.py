@@ -185,14 +185,17 @@ def test_codex_skystorm_ports_research_and_citation_contract() -> None:
     text = (_SKILLS / "q-skystorm" / "references" / "codex-host.md").read_text(
         encoding="utf-8"
     )
+    flat = " ".join(text.split())
 
     assert "anchor → harvest → pivot → map" in text
     assert 'Anchor (`mode="grounded"`)' in text
     assert 'Pivot (`mode="exploratory"`)' in text
     assert "Absence is inconclusive" in text
     assert "Research status:" in text
-    assert "backend/infrastructure failure" in text
-    assert "re-anchor" in text
+    assert "Research needs action: true" in flat
+    assert "### Required research actions" in flat
+    assert "RETRY-SAME" in text
+    assert "RE-ANCHOR" in text
     assert "pivot digest" in text
     assert "load-bearing" in text
     assert "artifact itself" in text

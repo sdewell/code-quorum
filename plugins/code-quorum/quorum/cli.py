@@ -286,9 +286,9 @@ def q_brainstorm(
             # Always show the digest (verdict included) to the USER; seed the
             # council only when the verdict is not a known whiff. The CLI is
             # not an orchestrator -- it cannot rework-and-retry, so a
-            # RETRY-RECOMMENDED digest must not anchor the council as evidence.
+            # RETRY-REQUIRED digest must not anchor the council as evidence.
             typer.echo(rendered + "\n", nl=False)
-            if compute_status(digest).code != "RETRY-RECOMMENDED":
+            if not compute_status(digest).needs_action:
                 digest_text = rendered
     rounds_results = asyncio.run(
         run_mode(

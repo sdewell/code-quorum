@@ -12,6 +12,8 @@ from quorum.research import (
     LibraryDoc,
     Paper,
     Repo,
+    ResearchAction,
+    ResearchStatus,
     ResearchDigest,
     SourceLaneStatus,
     _arxiv_id_from_doi,
@@ -2442,7 +2444,7 @@ def test_compute_status_off_topic_collision_is_retry():
         errors=(),
         counts=(("arxiv", 3),),
     )
-    assert compute_status(digest).code == "RETRY-RECOMMENDED"
+    assert compute_status(digest).code == "RETRY-REQUIRED"
 
 
 def test_compute_status_ignores_abstract_less_papers():
@@ -2519,7 +2521,7 @@ def test_compute_status_leaves_all_abstract_less_digest_unjudged():
 
 
 def test_compute_status_all_paper_sources_zero_is_retry():
-    """All paper sources queried but empty, on a clean query -> RETRY-RECOMMENDED
+    """All paper sources queried but empty, on a clean query -> RETRY-REQUIRED
     with a server-suggested shorter query. This is the 'don't give up' hinge:
     a zero here is a suspected bad query, not 'no prior art'."""
     from quorum.research import ResearchDigest, compute_status
@@ -2536,7 +2538,7 @@ def test_compute_status_all_paper_sources_zero_is_retry():
         ),
     )
     status = compute_status(digest)
-    assert status.code == "RETRY-RECOMMENDED"
+    assert status.code == "RETRY-REQUIRED"
     assert status.suggested_query  # a concrete reworked query to resubmit
 
 
@@ -2559,6 +2561,7 @@ def test_compute_status_legitimate_zero_is_ok():
     )
     status = compute_status(digest)
     assert status.code == "OK"
+    assert not status.needs_action
 
 
 def test_compute_status_config_error_outranks_a_bad_query():
@@ -2598,7 +2601,7 @@ def test_compute_status_low_overlap_splits_by_mode():
         errors=(),
         counts=(("arxiv", 3),),
     )
-    assert compute_status(digest, mode="grounded").code == "RETRY-RECOMMENDED"
+    assert compute_status(digest, mode="grounded").code == "RETRY-REQUIRED"
     assert compute_status(digest, mode="exploratory").code == "LOW-OVERLAP"
 
 
@@ -2614,7 +2617,7 @@ def test_format_digest_opens_with_research_status_line():
             topic="DanceGRPO flow matching", papers=off, counts=(("arxiv", 3),)
         )
     )
-    assert grounded.splitlines()[0].startswith("Research status: RETRY-RECOMMENDED")
+    assert grounded.splitlines()[0].startswith("Research status: RETRY-REQUIRED")
     explor = format_digest(
         ResearchDigest(
             topic="DanceGRPO flow matching", papers=off, counts=(("arxiv", 3),)
@@ -2690,11 +2693,221 @@ async def test_query_lanes_report_status_per_source_without_hiding_good_lane():
         ("lane-2", "QUERY-COLLISION"),
     }
     rendered = format_digest(digest)
-    assert rendered.startswith("Research status: OK")
+    assert rendered.startswith("Research status: RETRY-REQUIRED")
+    assert "Research needs action: true" in rendered
+    assert (
+        "| RE-ANCHOR | Europe PMC published | lane-2 | "
+        "<supply different domain-specific terms> |" in rendered
+    )
     assert "### Source/lane status" in rendered
     assert "| Europe PMC published | lane-1 | ON-TOPIC |" in rendered
     assert "| Europe PMC published | lane-2 | QUERY-COLLISION |" in rendered
     assert "only 0% of candidates share lane vocabulary" in rendered
+
+
+def test_usable_peer_evidence_with_exhausted_infrastructure_is_degraded():
+    """A source that survives its bounded in-tool retry must prevent OK, but
+    usable peer evidence means there is no remaining mechanical action for the
+    caller and therefore no need for cross-call retry state."""
+    digest = ResearchDigest(
+        topic="computational reproducibility",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="computational reproducibility",
+                code="ON-TOPIC",
+                detail="candidate vocabulary matches the query lane",
+                count=5,
+            ),
+            SourceLaneStatus(
+                source="arxiv",
+                lane="lane-1",
+                query="computational reproducibility",
+                code="INFRASTRUCTURE",
+                detail="source failed after its bounded retry",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "DEGRADED"
+    assert not status.needs_action
+    assert "bounded retry" in status.detail
+
+
+@pytest.mark.parametrize(
+    ("peer_code", "peer_count", "mode"),
+    (
+        ("THIN", 2, "grounded"),
+        ("QUERY-COLLISION", 5, "exploratory"),
+    ),
+)
+def test_any_mode_usable_peer_evidence_with_infrastructure_is_degraded(
+    peer_code, peer_count, mode
+):
+    digest = ResearchDigest(
+        topic="cross-domain method",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="github",
+                lane="lane-1",
+                query="cross-domain method",
+                code=peer_code,
+                detail="peer evidence",
+                count=peer_count,
+            ),
+            SourceLaneStatus(
+                source="context7",
+                lane="lane-1",
+                query="cross-domain method",
+                code="INFRASTRUCTURE",
+                detail="source failed after its bounded retry",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest, mode=mode)
+
+    assert status.code == "DEGRADED"
+    assert not status.needs_action
+
+
+def test_retry_required_status_cannot_omit_exact_actions():
+    with pytest.raises(ValueError, match="required_actions"):
+        ResearchStatus("RETRY-REQUIRED", "unfinished research")
+
+
+def test_empty_artifact_rows_render_an_exact_required_action():
+    digest = ResearchDigest(
+        topic="computational provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="context7",
+                lane="lane-1",
+                query="computational provenance",
+                code="THIN",
+                detail="only 0 candidates",
+                count=0,
+            ),
+            SourceLaneStatus(
+                source="github",
+                lane="lane-2",
+                query="experimental traceability",
+                code="THIN",
+                detail="only 0 candidates",
+                count=0,
+            ),
+        ),
+    )
+
+    rendered = format_digest(digest)
+
+    assert rendered.startswith("Research status: RETRY-REQUIRED")
+    assert "Research needs action: true" in rendered
+    assert "### Required research actions" in rendered
+    status = compute_status(digest)
+    assert {(action.source, action.lane) for action in status.required_actions} == {
+        ("context7", "lane-1"),
+        ("github", "lane-2"),
+    }
+
+
+def test_reanchor_action_does_not_present_the_rejected_query_as_executable():
+    rejected = "sinkhorn transport"
+    digest = ResearchDigest(
+        topic=rejected,
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query=rejected,
+                code="QUERY-COLLISION",
+                detail="collision",
+                count=3,
+            ),
+        ),
+    )
+
+    action = compute_status(digest).required_actions[0]
+
+    assert action.kind == "RE-ANCHOR"
+    assert action.query != rejected
+    assert "different domain" in action.query
+
+
+def test_empty_paper_stratum_retries_only_failed_sources():
+    """A peer source that completed with a valid zero must not be queried again;
+    only the source whose result is unknown needs the unchanged retry."""
+    digest = ResearchDigest(
+        topic="computational provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="arxiv",
+                lane="lane-1",
+                query="computational provenance",
+                code="INFRASTRUCTURE",
+                detail="source failed after its bounded retry",
+                count=0,
+            ),
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="computational provenance",
+                code="THIN",
+                detail="only 0 candidates",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert status.required_actions == (
+        ResearchAction("RETRY-SAME", "arxiv", "lane-1", "computational provenance"),
+    )
+
+
+def test_empty_paper_stratum_reworks_every_source_lane():
+    digest = ResearchDigest(
+        topic="computational provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="computational provenance",
+                code="THIN",
+                detail="only 0 candidates",
+                count=0,
+            ),
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-2",
+                query="experimental traceability",
+                code="THIN",
+                detail="only 0 candidates",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert {(action.source, action.lane) for action in status.required_actions} == {
+        ("openalex", "lane-1"),
+        ("openalex", "lane-2"),
+    }
 
 
 @pytest.mark.asyncio
@@ -2762,7 +2975,12 @@ async def test_artifact_hit_cannot_hide_empty_paper_stratum():
     statuses = {row.source: row.code for row in digest.source_statuses}
     assert statuses["github"] == "ON-TOPIC"
     assert statuses["openalex"] == "THIN"
-    assert compute_status(digest).code == "RETRY-RECOMMENDED"
+    status = compute_status(digest)
+    assert status.code == "RETRY-REQUIRED"
+    assert status.needs_action
+    assert status.required_actions
+    assert status.required_actions[0].source == "openalex"
+    assert status.required_actions[0].lane == "lane-1"
 
 
 @pytest.mark.asyncio
@@ -2788,7 +3006,7 @@ async def test_colliding_short_lane_requires_semantic_reanchor():
         )
 
     status = compute_status(digest)
-    assert status.code == "RETRY-RECOMMENDED"
+    assert status.code == "RETRY-REQUIRED"
     assert status.suggested_query == ""
     assert "semantically re-anchor" in status.detail
 
@@ -2806,7 +3024,7 @@ async def test_failed_arxiv_shortening_is_not_suggested_again():
         "computational experiment provenance reproducibility"
     )
     status = compute_status(digest)
-    assert status.code == "RETRY-RECOMMENDED"
+    assert status.code == "RETRY-REQUIRED"
     assert status.suggested_query == ""
 
 
@@ -2829,6 +3047,63 @@ def test_reworked_suggestion_names_the_colliding_lane():
     rendered = format_digest(digest)
 
     assert '· try lane-2: "minimum information experimental reporting"' in rendered
+
+
+def test_reworked_suggestion_names_its_own_lane_with_multiple_collisions():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="sinkhorn transport",
+                code="QUERY-COLLISION",
+                detail="collision",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-2",
+                query="minimum information experimental reporting provenance",
+                code="QUERY-COLLISION",
+                detail="collision",
+                count=3,
+            ),
+        ),
+    )
+
+    rendered = format_digest(digest)
+
+    assert '· try lane-2: "minimum information experimental reporting"' in rendered
+
+
+def test_errors_without_usable_evidence_require_retry_instead_of_degrading():
+    digest = ResearchDigest(
+        topic="diffusion flow matching",
+        papers=(),
+        errors=("context7: TimeoutException: slow",),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert status.needs_action
+
+
+def test_legacy_errors_deduplicate_required_source_actions():
+    digest = ResearchDigest(
+        topic="diffusion flow matching",
+        papers=(),
+        errors=(
+            "context7: TimeoutException: first lane",
+            "context7: TimeoutException: second lane",
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert [action.source for action in status.required_actions] == ["context7"]
 
 
 @pytest.mark.asyncio
@@ -3205,16 +3480,26 @@ def test_format_digest_renders_retry_notes():
 
 
 @pytest.mark.asyncio
-async def test_research_topic_retries_transient_with_same_query():
-    """A timeout is transient -- retry ONCE with the SAME query (not shortened)."""
+async def test_research_topic_retries_transient_with_same_query(monkeypatch):
+    """A timeout is transient -- retry ONCE with the SAME query after a
+    bounded delay, rather than immediately repeating the same failing call."""
+    import quorum.research as research_mod
+
     xml = (_FIXTURES / "arxiv_sample.xml").read_text()
     calls: list[str] = []
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
 
     def handler(request):
         calls.append(request.url.params.get("search_query", ""))
         if len(calls) == 1:
             raise httpx.TimeoutException("slow")
         return httpx.Response(200, text=xml)
+
+    monkeypatch.setattr(research_mod, "_TRANSIENT_RETRY_DELAY_S", 0.75)
+    monkeypatch.setattr(research_mod.asyncio, "sleep", fake_sleep)
 
     async with _client(handler) as client:
         digest = await research_topic(
@@ -3223,6 +3508,7 @@ async def test_research_topic_retries_transient_with_same_query():
 
     assert len(calls) == 2
     assert calls[0] == calls[1]  # same query on the retry
+    assert sleeps == [0.75]
     assert digest.papers and not digest.errors
     assert any("transient" in n for n in digest.notes)
 
@@ -3440,7 +3726,7 @@ def test_format_digest_shows_openalex_strata_and_full_text_availability():
 
 def test_compute_status_all_paper_sources_errored_is_not_ok():
     """When every paper source errors, none reach digest.counts. The verdict
-    must be RETRY-RECOMMENDED, not 'results look on-topic'."""
+    must be RETRY-REQUIRED, not 'results look on-topic'."""
     from quorum.research import ResearchDigest, compute_status
 
     digest = ResearchDigest(
@@ -3453,7 +3739,7 @@ def test_compute_status_all_paper_sources_errored_is_not_ok():
         ),
         counts=(),
     )
-    assert compute_status(digest).code == "RETRY-RECOMMENDED"
+    assert compute_status(digest).code == "RETRY-REQUIRED"
 
 
 def test_compute_status_omits_suggested_query_when_it_equals_original():
@@ -3469,7 +3755,7 @@ def test_compute_status_omits_suggested_query_when_it_equals_original():
         counts=(("arxiv", 0), ("openalex", 0)),
     )
     status = compute_status(digest)
-    assert status.code == "RETRY-RECOMMENDED"
+    assert status.code == "RETRY-REQUIRED"
     assert status.suggested_query == ""  # no identical-query suggestion
     assert "different" in status.detail.lower()  # steer to judgment, not a loop
 
@@ -3508,7 +3794,7 @@ def test_compute_status_mixed_error_and_zero_is_not_labeled_all_zero():
         errors=("arxiv: TimeoutException: timed out",),  # errored
     )
     status = compute_status(digest)
-    assert status.code == "RETRY-RECOMMENDED"
+    assert status.code == "RETRY-REQUIRED"
     assert "returned 0 on a valid query" not in status.detail
     assert "failed" in status.detail.lower()  # the infra failure is surfaced
     assert "arxiv" in status.detail.lower()  # and names WHICH source to investigate
@@ -3528,7 +3814,7 @@ def test_compute_status_omits_suggested_query_for_case_only_rework():
         counts=(("arxiv", 0), ("openalex", 0)),
     )
     status = compute_status(digest)
-    assert status.code == "RETRY-RECOMMENDED"
+    assert status.code == "RETRY-REQUIRED"
     assert status.suggested_query == ""  # case-only rework is not offered
     assert "different" in status.detail.lower()
 

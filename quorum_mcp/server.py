@@ -441,19 +441,19 @@ async def q_research(
 
     The digest opens with `Research status:` and a `Source/lane status` table.
     Each row is ON-TOPIC, THIN, QUERY-COLLISION, SOURCE-MISMATCH,
-    INFRASTRUCTURE, or CONFIG. A global OK must not conceal a weak row, and one
-    noisy source must not sink a good lane. A RETRY-RECOMMENDED result usually
-    offers a mechanical shortening once. If it still collides, use a semantic
-    re-anchor with different terminology. When the suggestion is absent, follow
-    the detail. Retry the same query on infrastructure failure. Re-anchor an
-    un-shortenable query. Do not proceed until a reworked retry has ALSO failed.
-    Do not fall back on your own knowledge; that is the specific failure to avoid.
+    INFRASTRUCTURE, or CONFIG. OK means no follow-up action remains. DEGRADED
+    means a source exhausted its bounded retry but usable peer evidence remains;
+    proceed and disclose it. RETRY-REQUIRED is paired with `Research needs
+    action: true` and an exact action/source/lane table. Retry rows carry an
+    executable query; a re-anchor row explicitly requires different domain
+    terms. Do not fall back on your own knowledge; that is the specific failure
+    to avoid.
 
-    Mechanically-fixable failures are retried once inside the tool and marked
-    with `↻`. CONFIG requires fixing the credential or proceeding on peer
-    sources. `mode` is grounded or exploratory; exploratory enables the
-    OpenAlex field map for the primary query lane and treats cross-domain
-    structural hits as intentional.
+    Mechanically-fixable failures are retried once inside the tool, with a
+    bounded delay where appropriate, and marked with `↻`. CONFIG requires
+    fixing the credential or proceeding on peer sources. `mode` is grounded or
+    exploratory; exploratory enables the OpenAlex field map for the primary
+    query lane and treats cross-domain structural hits as intentional.
     """
     # Reject a bad mode up front, before any backend is queried -- otherwise a
     # typo burns 10-15s of concurrent HTTP and rate limit only to crash in

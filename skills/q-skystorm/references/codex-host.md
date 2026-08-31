@@ -65,7 +65,7 @@ use different `mode` values:
 
 - **Anchor (`mode="grounded"`).** Query the topic's home domain with two or
   more domain terms. Grounded mode makes an off-topic home-domain result
-  `RETRY-RECOMMENDED`, so fix the anchor before harvesting from it. The overlap
+  `RETRY-REQUIRED`, so fix the anchor before harvesting from it. The overlap
   check needs three papers; with one or two, inspect the titles before harvest.
   Form 2–3 semantic `query_lanes` (domain/construct, failure/validity, and
   review/guideline terminology) and use `purpose="methods"`.
@@ -83,18 +83,20 @@ use different `mode` values:
   related field directly before ruling it out.
 
 Act on the digest's `Research status:` line before anything else, and quote it
-verbatim in Step 6. `RETRY-RECOMMENDED` usually includes a suggested query;
-when it does, resubmit it before concluding there is no prior art. When the
-suggestion is absent, follow the detail: retry the same query for a
-backend/infrastructure failure, but re-anchor with different domain-specific
-terms for an un-shortenable query. `LOW-OVERLAP` is expected for a pivot;
-`CONFIG` is a key/access problem. Internal retry notes (`↻`) record a recovered
-first-attempt failure. A domain-legitimate zero is evidence, not a whiff. If
+verbatim in Step 6. `RETRY-REQUIRED` usually includes a suggested query;
+when it does, resubmit it before concluding there is no prior art. `Research
+needs action: true` and `### Required research actions` list exact operations:
+preserve the query for `RETRY-SAME`, or supply different domain terms for
+`RE-ANCHOR`. `DEGRADED` means a source exhausted its bounded retry but usable
+peer evidence remains; proceed and disclose it without retrying by hand.
+`LOW-OVERLAP` is expected for a pivot; `CONFIG` is a key/access problem.
+Internal retry notes (`↻`) record a recovered first-attempt failure. A
+domain-legitimate zero is evidence, not a whiff. If
 research remains empty after this protocol, start the dream stage unseeded.
 Read every row in `### Source/lane status`: `ON-TOPIC`, `THIN`,
 `QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`. Use one
 mechanical shortening at most; a repeated `QUERY-COLLISION` requires a semantic
-re-anchor with different terminology.
+re-anchor with different terminology. `OK` means no required action remains.
 
 Read results for portable structure, not literal precedent. A far-flung hit is
 the find when it shares structural kinship: a transferable data shape or
@@ -115,8 +117,9 @@ Call `mcp__quorum_codex__q_brainstorm_start` with:
 - `research`: the **pivot digest** from Step 2, passed verbatim. If several
   pivots ran, use the strongest cross-domain digest (or two short digests).
   Omit it under `--no-research` or when recovery still leaves a
-  `RETRY-RECOMMENDED` result. Seed a `LOW-OVERLAP` pivot and an `OK` digest
-  whose domain-legitimate sources return zero hits.
+  `RETRY-REQUIRED` result. Seed `DEGRADED` with its outage disclosure, a
+  `LOW-OVERLAP` pivot, and an `OK` digest whose domain-legitimate sources
+  return zero hits.
 - `verbose`: `false` by default; pass `true` only when `--verbose` was given.
 
 Pin the external roster and roles exactly. Codex's Step 1 pass stays behind the

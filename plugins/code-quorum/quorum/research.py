@@ -327,7 +327,7 @@ def _retry_hint(error: str) -> str:
 def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
     """Render a digest as prompt-safe markdown. Opens with a deterministic
     `Research status:` verdict line (see `compute_status`) so the consumer meets
-    the quality judgment before any result and can act on RETRY-RECOMMENDED
+    the quality judgment before any result and can act on RETRY-REQUIRED
     before falling back. Failed sources appear under 'Sources unavailable' --
     each with an inline retry hint -- and a per-source count footer makes a
     queried-but-empty source visible. `mode` ('grounded'|'exploratory') is
@@ -337,7 +337,27 @@ def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
     if status.suggested_query:
         lane = f" {status.suggested_lane}" if status.suggested_lane else ""
         status_line += f' · try{lane}: "{status.suggested_query}"'
-    lines: list[str] = [status_line, "", f"## Prior art for: {digest.topic}", ""]
+    lines: list[str] = [
+        status_line,
+        f"Research needs action: {str(status.needs_action).lower()}",
+        "",
+    ]
+    if status.required_actions:
+        lines.extend(
+            (
+                "### Required research actions",
+                "| Action | Source | Lane | Query |",
+                "|---|---|---|---|",
+            )
+        )
+        for action in status.required_actions:
+            query = action.query.replace("|", "\\|")
+            lines.append(
+                f"| {action.kind} | {_SOURCE_LABELS.get(action.source, action.source)} "
+                f"| {action.lane} | {query} |"
+            )
+        lines.append("")
+    lines.extend((f"## Prior art for: {digest.topic}", ""))
     if digest.source_statuses:
         lines.extend(
             (
@@ -472,6 +492,9 @@ _ARXIV_URL = "https://export.arxiv.org/api/query"
 # retried sooner just re-hits the wall (tests patch this to 0).
 _RATE_PAUSE_S = 3.0
 _MAX_RATE_WAIT_S = 15.0
+# A non-rate transient gets one delayed retry. Keeping the delay here, rather
+# than in each adapter, makes the bounded policy identical across sources.
+_TRANSIENT_RETRY_DELAY_S = 1.0
 # Monotonic time before which no rate-classed retry may fire. Concurrent
 # refusals must not sleep the same fixed pause and wake in lockstep, which
 # would recreate the burst that triggered the refusal. Each retry claims the
@@ -1619,16 +1642,74 @@ def _scoreable_artifact_texts(
 
 
 @dataclass(frozen=True)
+class ResearchAction:
+    """One exact source/lane operation required before research may proceed."""
+
+    kind: str
+    source: str
+    lane: str
+    query: str
+
+
+_REANCHOR_QUERY = "<supply different domain-specific terms>"
+
+
+@dataclass(frozen=True)
 class ResearchStatus:
     """The deterministic quality verdict rendered as the digest's first line.
-    `code` is one of OK / RETRY-RECOMMENDED / CONFIG / LOW-OVERLAP; `detail` is
-    a one-line human reason; `suggested_query`, when set, is a concrete reworked
-    query the caller can resubmit verbatim."""
+    `code` is one of OK / DEGRADED / RETRY-REQUIRED / CONFIG / LOW-OVERLAP;
+    `detail` is a one-line human reason. `required_actions` preserves exact
+    source/lane/query work instead of asking the caller to infer it from rows."""
 
     code: str
     detail: str
     suggested_query: str = ""
     suggested_lane: str = ""
+    required_actions: tuple[ResearchAction, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.code == "RETRY-REQUIRED" and not self.required_actions:
+            raise ValueError("RETRY-REQUIRED status must include required_actions")
+
+    @property
+    def needs_action(self) -> bool:
+        return self.code == "RETRY-REQUIRED"
+
+
+def _required_actions(rows: Iterable[SourceLaneStatus]) -> tuple[ResearchAction, ...]:
+    actions: list[ResearchAction] = []
+    for row in rows:
+        if row.code == "INFRASTRUCTURE":
+            actions.append(
+                ResearchAction("RETRY-SAME", row.source, row.lane, row.query)
+            )
+            continue
+        if row.code != "QUERY-COLLISION":
+            continue
+        actions.append(_query_action(row.source, row.lane, row.query))
+    return tuple(actions)
+
+
+def _query_action(source: str, lane: str, query: str) -> ResearchAction:
+    reworked = _rework(query)
+    return ResearchAction(
+        "RETRY-SHORTENED" if reworked else "RE-ANCHOR",
+        source,
+        lane,
+        reworked or _REANCHOR_QUERY,
+    )
+
+
+def _query_actions(rows: Iterable[SourceLaneStatus]) -> tuple[ResearchAction, ...]:
+    actions: list[ResearchAction] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        key = (row.source, row.lane, row.query)
+        if key in seen:
+            continue
+        seen.add(key)
+        actions.append(_query_action(row.source, row.lane, row.query))
+    return tuple(actions)
 
 
 def _source_lane_status(
@@ -1776,7 +1857,7 @@ def compute_status(
     digest: "ResearchDigest", *, mode: str = "grounded"
 ) -> ResearchStatus:
     """Derive the quality verdict from a completed digest. `mode` is 'grounded'
-    (brainstorm: a low on-topic score is a defect -> RETRY-RECOMMENDED) or
+    (brainstorm: a low on-topic score is a defect -> RETRY-REQUIRED) or
     'exploratory' (skystorm: a low score is reported as LOW-OVERLAP but never
     forces a retry, because a deliberate cross-domain probe is expected to read
     off-domain).
@@ -1784,7 +1865,7 @@ def compute_status(
     Precedence: a CONFIG error (rejected key / anonymous load-shed) outranks
     everything -- a retry cannot fix it, so it must not be mistaken for a bad
     query. Then a paper stratum that produced NO evidence -- whether every paper
-    source errored or every one returned 0 -- is RETRY-RECOMMENDED,
+    source errored or every one returned 0 -- is RETRY-REQUIRED,
     never OK. Then low lexical overlap. Otherwise OK. The zero-legitimacy cases
     Source mismatches never trip a retry when a peer source found on-topic work;
     they are explicit rows rather than hidden in the aggregate."""
@@ -1812,38 +1893,35 @@ def compute_status(
         if paper_rows and all(row.count == 0 for row in paper_rows):
             if any(row.code == "INFRASTRUCTURE" for row in paper_rows):
                 return ResearchStatus(
-                    "RETRY-RECOMMENDED",
+                    "RETRY-REQUIRED",
                     summary
                     + "; the paper stratum produced no evidence and at least one "
-                    "paper source failed -- retry the same lanes",
+                    "paper source failed -- retry each failed source/lane without "
+                    "changing terms",
+                    required_actions=_required_actions(paper_rows),
                 )
-            reworked, lane = next(
-                (
-                    (candidate, row.lane)
-                    for row in paper_rows
-                    if (candidate := _rework(row.query))
-                ),
-                ("", ""),
+            actions = _query_actions(paper_rows)
+            suggested_action = next(
+                (action for action in actions if action.kind == "RETRY-SHORTENED"),
+                None,
             )
             return ResearchStatus(
-                "RETRY-RECOMMENDED",
+                "RETRY-REQUIRED",
                 summary + "; the paper stratum produced no evidence",
-                reworked,
-                lane,
+                suggested_query=suggested_action.query if suggested_action else "",
+                suggested_lane=suggested_action.lane if suggested_action else "",
+                required_actions=actions,
             )
-        if counts.get("ON-TOPIC"):
-            return ResearchStatus("OK", summary)
-        collision = next(
-            (row for row in digest.source_statuses if row.code == "QUERY-COLLISION"),
-            None,
+        collisions = tuple(
+            row for row in digest.source_statuses if row.code == "QUERY-COLLISION"
         )
-        if collision is not None:
-            if mode == "exploratory":
-                return ResearchStatus(
-                    "LOW-OVERLAP",
-                    summary + "; acceptable for a deliberate cross-domain probe",
-                )
-            reworked = _rework(collision.query)
+        if collisions and mode == "grounded":
+            actions = _required_actions(collisions)
+            suggested_action = next(
+                (action for action in actions if action.kind == "RETRY-SHORTENED"),
+                None,
+            )
+            reworked = suggested_action.query if suggested_action else ""
             detail = (
                 summary
                 + "; "
@@ -1856,34 +1934,47 @@ def compute_status(
                 )
             )
             return ResearchStatus(
-                "RETRY-RECOMMENDED",
+                "RETRY-REQUIRED",
                 detail,
-                reworked,
-                collision.lane if reworked else "",
+                suggested_query=reworked,
+                suggested_lane=suggested_action.lane if suggested_action else "",
+                required_actions=actions,
             )
         if counts.get("INFRASTRUCTURE"):
+            if any(row.count > 0 for row in digest.source_statuses):
+                return ResearchStatus(
+                    "DEGRADED",
+                    summary + "; one or more sources exhausted their bounded retry -- "
+                    "proceed with the available evidence and disclose the outage",
+                )
             return ResearchStatus(
-                "RETRY-RECOMMENDED",
+                "RETRY-REQUIRED",
                 summary + "; retry the failed source/lane without changing terms",
+                required_actions=_required_actions(digest.source_statuses),
+            )
+        if counts.get("ON-TOPIC"):
+            return ResearchStatus("OK", summary)
+        if collisions:
+            return ResearchStatus(
+                "LOW-OVERLAP",
+                summary + "; acceptable for a deliberate cross-domain probe",
             )
         if any(row.count > 0 for row in digest.source_statuses):
             return ResearchStatus(
                 "OK",
                 summary + "; thin rows require manual relevance review",
             )
-        reworked, lane = next(
-            (
-                (candidate, row.lane)
-                for row in digest.source_statuses
-                if (candidate := _rework(row.query))
-            ),
-            ("", ""),
+        actions = _query_actions(digest.source_statuses)
+        suggested_action = next(
+            (action for action in actions if action.kind == "RETRY-SHORTENED"),
+            None,
         )
         return ResearchStatus(
-            "RETRY-RECOMMENDED",
+            "RETRY-REQUIRED",
             summary + "; broaden or semantically re-anchor the thin lanes",
-            reworked,
-            lane,
+            suggested_query=suggested_action.query if suggested_action else "",
+            suggested_lane=suggested_action.lane if suggested_action else "",
+            required_actions=actions,
         )
 
     config = next((e for e in digest.errors if _error_class(e) == "config"), None)
@@ -1909,10 +2000,14 @@ def compute_status(
             # Every attempted paper source errored (already retried once in-tool).
             # Infrastructure, not the query -- so no reworked query to suggest.
             return ResearchStatus(
-                "RETRY-RECOMMENDED",
+                "RETRY-REQUIRED",
                 "every paper source failed after an in-tool retry -- retry once "
                 "more, or proceed on the other evidence and say so; do not fall "
                 "back on your own knowledge silently",
+                required_actions=tuple(
+                    ResearchAction("RETRY-SAME", source, "lane-1", digest.topic)
+                    for source in sorted(paper_failed)
+                ),
             )
         if paper_failed:
             # Mixed: some paper sources errored while the rest returned 0. The
@@ -1922,11 +2017,15 @@ def compute_status(
             # rework (do not mutate a possibly-fine query).
             failed = ", ".join(sorted(paper_failed))
             return ResearchStatus(
-                "RETRY-RECOMMENDED",
+                "RETRY-REQUIRED",
                 f"some paper sources failed ({failed}) and the rest returned 0 -- "
                 "the empty result may be incomplete; retry, and if it persists "
                 "proceed on the other evidence and say so, do not fall back "
                 "silently",
+                required_actions=tuple(
+                    ResearchAction("RETRY-SAME", source, "lane-1", digest.topic)
+                    for source in sorted(paper_failed)
+                ),
             )
         reworked = _rework(digest.topic)
         detail = "every paper source returned 0 on a valid query -- " + (
@@ -1935,7 +2034,14 @@ def compute_status(
             else "re-anchor with DIFFERENT domain-specific terms (your judgment); "
             "do not resubmit the same query, and do not fall back silently"
         )
-        return ResearchStatus("RETRY-RECOMMENDED", detail, reworked)
+        action = _query_action("All sources", "lane-1", digest.topic)
+        return ResearchStatus(
+            "RETRY-REQUIRED",
+            detail,
+            suggested_query=reworked,
+            suggested_lane="lane-1" if reworked else "",
+            required_actions=(action,),
+        )
     texts = _scoreable_texts(digest.papers, digest.topic)
     frac = _on_topic_fraction(texts, digest.topic)
     if frac is not None and len(texts) >= _MIN_SCORING_HITS and frac < _ON_TOPIC_MIN:
@@ -1954,7 +2060,33 @@ def compute_status(
             else "with unrelated work; re-anchor with DIFFERENT domain-specific "
             "terms (your judgment) and resubmit -- do not resubmit the same query"
         )
-        return ResearchStatus("RETRY-RECOMMENDED", detail, reworked)
+        action = _query_action("All sources", "lane-1", digest.topic)
+        return ResearchStatus(
+            "RETRY-REQUIRED",
+            detail,
+            suggested_query=reworked,
+            suggested_lane="lane-1" if reworked else "",
+            required_actions=(action,),
+        )
+    if digest.errors:
+        failed_sources = sorted({e.split(":", 1)[0] for e in digest.errors})
+        failed = ", ".join(failed_sources)
+        if not any((digest.papers, digest.libraries, digest.repos, digest.models)):
+            actions = tuple(
+                ResearchAction("RETRY-SAME", source, "lane-1", digest.topic)
+                for source in failed_sources
+            )
+            return ResearchStatus(
+                "RETRY-REQUIRED",
+                f"sources failed after their bounded retry ({failed}) and no usable "
+                "evidence remains",
+                required_actions=actions,
+            )
+        return ResearchStatus(
+            "DEGRADED",
+            f"sources failed after their bounded retry ({failed}) -- proceed with "
+            "the available evidence and disclose the outage",
+        )
     return ResearchStatus("OK", "results look on-topic")
 
 
@@ -2099,7 +2231,8 @@ async def _contained(name: str, factory, query: str):
             if fire_at is None:
                 return name, None, err, None, attempt_query
             await asyncio.sleep(max(0.0, fire_at - time.monotonic()))
-        # 'transient' falls through with attempt_query == query
+        else:
+            await asyncio.sleep(_TRANSIENT_RETRY_DELAY_S)
     try:
         value = await factory(attempt_query)
     except Exception as exc:  # noqa: BLE001 -- retry also failed; surface it

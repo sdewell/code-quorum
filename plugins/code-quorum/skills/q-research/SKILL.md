@@ -90,26 +90,30 @@ sink a good lane. Each row is one of:
   semantic re-anchor with different terminology.
 - `SOURCE-MISMATCH` — this source returned nothing while a peer source found
   on-topic work for the same lane; do not force that source to fit the domain.
-- `INFRASTRUCTURE` — the source failed after its bounded retry; retry the same
-  lane because changing terms cannot repair an outage.
+- `INFRASTRUCTURE` — the source failed after its bounded, delayed retry. A
+  `DEGRADED` digest may proceed on usable peer evidence; a `RETRY-REQUIRED`
+  digest names the same-lane retry needed because the required evidence is absent.
 - `CONFIG` — a credential or access problem; changing the query cannot fix it.
 
 The combined `Research status:` line summarizes those rows:
 
-- `OK` — at least one source/lane is on-topic and no configuration problem
-  needs priority; read every non-OK status row before proceeding. Infrastructure
-  failures remain visible in the summary and table even when a peer paper source
-  supplied usable evidence.
-- `RETRY-RECOMMENDED` — the query whiffed or collided with unrelated work. It
+- `OK` — the workflow is complete and no follow-up action is required. `THIN`
+  and `SOURCE-MISMATCH` rows may remain as legitimate coverage information.
+- `DEGRADED` — one or more sources exhausted their bounded retry, but usable
+  peer evidence remains. Proceed, disclose each failed source, and do not repeat
+  the mechanical retry by hand.
+- `RETRY-REQUIRED` — required evidence is absent or a query lane whiffed or
+  collided with unrelated work. `Research needs action: true` and the
+  `### Required research actions` table name the exact action, source, and lane.
+  Retry rows carry an executable query; a `RE-ANCHOR` row instead marks that
+  different domain terms must be supplied. It
   **usually** carries one explicitly labelled mechanical shortening (`· try: "…"`) —
   resubmit it once before concluding "no prior art". If that result still
   reports `QUERY-COLLISION`, perform a semantic re-anchor instead of shortening
-  again. When the suggestion is **absent**,
-  the detail text after the dash names the move, and the two cases need
-  opposite ones: a **backend/infrastructure failure** says *retry* — resubmit
-  the **same** query (changing terms cannot fix an outage); an
-  **un-shortenable query** says *re-anchor* — resubmit with DIFFERENT
-  domain-specific terms of your own. Shrugging the result off and answering
+  again. When the suggestion is **absent**, follow the required-actions table:
+  `RETRY-SAME` preserves an infrastructure-failed query, while `RE-ANCHOR`
+  requires DIFFERENT domain-specific terms of your own. Shrugging the result
+  off and answering
   from your own knowledge — *"the research backend choked, I'll use what I
   know"* — is the **specific failure to avoid**; only after a reworked retry
   has **also** failed may you note a source unavailable and continue.
@@ -120,7 +124,8 @@ The combined `Research status:` line summarizes those rows:
   literal subject-matter overlap.
 
 Mechanically-fixable failures (an arXiv 400, its 200-with-`Rate exceeded`
-rate refusal, a transient flake) are **already retried inside the tool** — a
+rate refusal, a transient flake) are **already retried inside the tool** with a
+bounded delay where appropriate — a
 `↻` note marks a source that was repaired, not
 hidden. A `SOURCE-MISMATCH` row is a real answer, not a whiff to rework.
 

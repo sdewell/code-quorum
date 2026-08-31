@@ -76,35 +76,32 @@ not manufacture lanes by repeatedly deleting words from one query.
 
 **The digest opens with a `Research status:` line — act on it before anything else, and quote it in
 Step 5.** It is the deterministic quality verdict:
-- `RETRY-RECOMMENDED` — the query whiffed or collided with unrelated work (off-topic hits, or every
+- `RETRY-REQUIRED` — the query whiffed or collided with unrelated work (off-topic hits, or every
   paper source empty on a valid query). It **usually** carries a suggested shorter query (shown as
   `· try: "…"`) — when present, you must call `q_research` again with it before concluding "no
-  prior art". When it is **absent**, do exactly what the detail text after the dash says — the two
-  absent cases need opposite moves: on a **backend/infrastructure failure** (sources errored or
-  timed out) the detail says *retry* — resubmit the **same** query, because changing terms cannot
-  fix an outage; when the query simply **cannot be shortened** the detail says *re-anchor* —
-  resubmit with DIFFERENT domain-specific terms of your own. Either way the escape
+  prior art". `Research needs action: true` and the `### Required research actions` table name
+  every exact action. `RETRY-SAME` preserves an infrastructure-failed query because changing terms
+  cannot fix an outage; `RE-ANCHOR` requires DIFFERENT domain-specific terms of your own. The escape
   hatch is gated behind an actual retry: shrugging the result off and falling back on your
   own knowledge — *"the research backend choked, I'll use what I know"* —
   is the **specific failure to avoid**.
+- `DEGRADED` — a source exhausted its bounded, delayed retry but usable peer evidence remains;
+  seed that evidence, disclose the failed source, and do not repeat the mechanical retry by hand.
 - `CONFIG` — a key/anonymous-access problem no retry fixes; proceed on the other sources and say so.
-- `OK` — results look on-topic; proceed.
+- `OK` — the research workflow is complete and no follow-up action is required.
 
 Immediately inspect `### Source/lane status`. Its rows are `ON-TOPIC`, `THIN`,
 `QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`. A combined
-OK does not erase a weak row. On `QUERY-COLLISION`, use the suggested mechanical
+`OK` contains no required work. On `QUERY-COLLISION`, use the suggested mechanical
 shortening once; if that lane still collides, use a semantic re-anchor with
-different terminology. Retry an `INFRASTRUCTURE` row with the same lane, fix or
-disclose `CONFIG`, and accept `SOURCE-MISMATCH` rather than forcing a source to
-fit the domain.
+different terminology. Follow the required-actions table on `RETRY-REQUIRED`,
+disclose `INFRASTRUCTURE` under `DEGRADED`, fix or disclose `CONFIG`, and accept
+`SOURCE-MISMATCH` rather than forcing a source to fit the domain.
 
 Mechanically-fixable failures (an arXiv 400, its 200-with-`Rate exceeded` rate refusal, a
-transient flake) are **already retried inside the
-tool** — a `↻` note marks a source that a first-attempt error you never saw was repaired on, not
-hidden. A `SOURCE-MISMATCH` row is a real answer, not a whiff to rework. Only
-after a **reworked* retry has **also** failed** may you note a
-source unavailable and continue (never block on it) — start the council unseeded rather than not
-at all.
+transient flake) are **already retried inside the tool**, with a bounded delay
+where appropriate. A `↻` note marks a repaired first-attempt error. A
+`SOURCE-MISMATCH` row is a real answer, not a whiff to rework.
 
 ## Step 3 — Start the agents (non-blocking, seeded with the digest)
 
@@ -118,9 +115,11 @@ Call `mcp__plugin_code-quorum_quorum__q_brainstorm_start` (Claude Code) or
   your own Step-1 ideas (those stay behind the anti-bias gate). The server
   frames it for the agents as evidence to build from. Omit under
   `--no-research`, or when the final `Research status:` is still
-  `RETRY-RECOMMENDED` after the retry protocol (known-bad evidence must not
-  anchor the council). A digest whose status is `OK` with zero hits from
-  domain-legitimate sources still gets seeded — the zero is itself evidence.
+  `RETRY-REQUIRED` after the retry protocol (known-bad evidence must not
+  anchor the council). Seed a `DEGRADED` digest because its peer evidence is
+  usable; preserve its outage disclosure. A digest whose status is `OK` with
+  zero hits from domain-legitimate sources still gets seeded — the zero is
+  itself evidence.
 - `verbose`: `false` by default — ideas come back **terse** (tight
   rationale/trade-offs, no padding). Set `true` only if the user gave
   `--verbose`.

@@ -18,6 +18,7 @@ async def test_q_research_impl_returns_markdown(monkeypatch):
     out = await server.q_research("diffusion models", None, 5)
     # Opens with the deterministic verdict line, then the prior-art heading.
     assert out.startswith("Research status: ")
+    assert "Research needs action: false" in out
     assert "## Prior art for: diffusion models" in out
     assert "**lib**" in out
 
@@ -79,23 +80,22 @@ def test_q_research_docstring_demands_retry_before_fallback():
     # first error as terminal and fall back to its own knowledge.
     doc = server.q_research.__doc__ or ""
     assert "retry" in doc.lower()
-    assert "reworked retry has ALSO failed" in doc
+    assert "Research needs" in doc
+    assert "exact action/source/lane table" in doc
+    assert "Retry rows carry an" in doc
     assert "fall back on your" in doc.lower()
 
 
-def test_q_research_docstring_allows_absent_suggested_query():
-    # Round-2/3 q-review: the tool now emits RETRY-RECOMMENDED without a
-    # suggestion on total backend failure / un-shortenable queries. The docstring
-    # travels to every caller: it must not promise a suggestion is always present,
-    # AND it must branch the two absent cases (retry-same on infrastructure vs
-    # re-anchor on an un-shortenable query) rather than blanket "re-anchor" --
-    # blanket re-anchor mutates a fine query on an outage (round-3 contradiction).
+def test_q_research_docstring_routes_exact_required_actions():
+    # A RETRY-REQUIRED result may lack a suggested shortening. The exact action
+    # table must distinguish retrying an infrastructure-failed query unchanged
+    # from semantically re-anchoring an unshortenable query.
     doc = server.q_research.__doc__ or ""
     low = doc.lower()
-    assert "usually" in low
-    assert "absent" in low
-    assert "re-anchor" in low  # the un-shortenable case
-    assert "retry the same" in low  # the infrastructure case (opposite move)
+    assert "retry rows carry an" in low
+    assert "executable query" in low
+    assert "re-anchor row" in low
+    assert "different domain" in low
 
 
 @pytest.mark.asyncio

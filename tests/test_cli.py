@@ -411,8 +411,8 @@ def test_q_brainstorm_no_research_skips_research(monkeypatch):
     assert "Prior art" not in result.stdout
 
 
-def test_q_brainstorm_does_not_seed_a_retry_recommended_digest(monkeypatch):
-    """The CLI cannot act on RETRY-RECOMMENDED. It must show a known-bad
+def test_q_brainstorm_does_not_seed_a_retry_required_digest(monkeypatch):
+    """The CLI cannot act on RETRY-REQUIRED. It must show a known-bad
     digest to the user without seeding it into the quorum prompt as evidence."""
     import quorum.cli as cli
     from quorum.agents.base import AgentResult
@@ -425,7 +425,7 @@ def test_q_brainstorm_does_not_seed_a_retry_recommended_digest(monkeypatch):
         return [[AgentResult(agent="codex", output="agent idea", role="skeptic")]]
 
     async def fake_research_topic(topic, **kw):
-        # Every paper source empty on a valid query -> RETRY-RECOMMENDED.
+        # Every paper source empty on a valid query -> RETRY-REQUIRED.
         return ResearchDigest(
             topic=topic, papers=(), counts=(("arxiv", 0), ("openalex", 0))
         )
@@ -434,9 +434,40 @@ def test_q_brainstorm_does_not_seed_a_retry_recommended_digest(monkeypatch):
     monkeypatch.setattr(cli, "research_topic", fake_research_topic)
     result = runner.invoke(app, ["q-brainstorm", "diffusion flow matching"])
     assert result.exit_code == 0
-    assert "RETRY-RECOMMENDED" in result.stdout  # user sees why
-    assert seen_prompts and "RETRY-RECOMMENDED" not in seen_prompts[0]  # unseeded
+    assert "RETRY-REQUIRED" in result.stdout  # user sees why
+    assert seen_prompts and "RETRY-REQUIRED" not in seen_prompts[0]  # unseeded
     assert "Prior art" not in seen_prompts[0]
+
+
+def test_q_brainstorm_seeds_a_degraded_digest(monkeypatch):
+    """DEGRADED is explicit partial coverage, not unfinished query work. The
+    available evidence and its outage disclosure must both reach the quorum."""
+    import quorum.cli as cli
+    from quorum.agents.base import AgentResult
+    from quorum.research import Paper, ResearchDigest
+
+    seen_prompts: list[str] = []
+
+    async def fake_run_mode(**kw):
+        seen_prompts.append(kw["prompt"])
+        return [[AgentResult(agent="codex", output="agent idea", role="skeptic")]]
+
+    async def fake_research_topic(topic, **kw):
+        return ResearchDigest(
+            topic=topic,
+            papers=(Paper("Prior work", ("Ada",), 2024, "arxiv", "1", "u", "abs"),),
+            errors=("openalex: TimeoutException: slow",),
+            counts=(("arxiv", 1),),
+        )
+
+    monkeypatch.setattr(cli, "run_mode", fake_run_mode)
+    monkeypatch.setattr(cli, "research_topic", fake_research_topic)
+    result = runner.invoke(app, ["q-brainstorm", "diffusion flow matching"])
+
+    assert result.exit_code == 0
+    assert "Research status: DEGRADED" in result.stdout
+    assert seen_prompts and "Research status: DEGRADED" in seen_prompts[0]
+    assert "openalex: TimeoutException: slow" in seen_prompts[0]
 
 
 def test_q_brainstorm_research_crash_degrades_to_unseeded_run(monkeypatch):

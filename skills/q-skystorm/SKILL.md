@@ -68,7 +68,7 @@ far-afield domains come back *from the literature* instead of your own priors.
 - **Anchor (`mode="grounded"`).** One query in the topic's home domain (2+
   domain terms, the normal not-a-bare-word bar — the tool refuses a generic
   one outright). Use **grounded** so an off-topic home-domain result trips
-  `RETRY-RECOMMENDED` and you fix the anchor *before* harvesting from it —
+  `RETRY-REQUIRED` and you fix the anchor *before* harvesting from it —
   exploratory mode would accept a bad anchor as `LOW-OVERLAP` and its
   contaminated vocabulary would poison every pivot term you pull. The
   overlap check needs ≥3 papers to fire, so if the anchor returns only one
@@ -105,22 +105,21 @@ far-afield domains come back *from the literature* instead of your own priors.
 
 **Act on the `Research status:` line** (the digest's first line) before
 anything else, and **quote it verbatim** in your Step 6 narration:
-`RETRY-RECOMMENDED` **usually** carries a suggested query (shown as
+`RETRY-REQUIRED` **usually** carries a suggested query (shown as
 `· try: "…"`) — when present, resubmit it before concluding "no prior art".
-When it is **absent**, do what the detail text says — the two absent cases
-need opposite moves: a **backend/infrastructure failure** says *retry* (the
-same query — an outage is not fixed by changing terms), while an
-**un-shortenable query** says *re-anchor* with DIFFERENT domain-specific
-terms of your own. `LOW-OVERLAP` is expected for a pivot and needs
-no retry; `CONFIG` is a key/access problem no retry fixes. Mechanically-
-fixable failures (arXiv 400, its 200-with-`Rate exceeded` rate refusal, a
-transient flake) are already retried inside
-the tool — a `↻` note means a first-attempt error you never saw was
-handled, not hidden. A domain-legitimate 0 (GitHub/HuggingFace on a
+`Research needs action: true` and `### Required research actions` list every
+exact operation: preserve the query for `RETRY-SAME`, or supply different
+domain terms for `RE-ANCHOR`. `DEGRADED` means a source exhausted its bounded,
+delayed retry but usable peer evidence remains; proceed and disclose it without
+repeating the mechanical retry by hand. `LOW-OVERLAP` is expected for a pivot
+and needs no retry; `CONFIG` is a key/access problem no retry fixes.
+Mechanically-fixable failures are retried inside the tool — a `↻` note means a
+first-attempt error was handled, not hidden. A domain-legitimate 0 (GitHub/HuggingFace on a
 non-software topic or another source marked `SOURCE-MISMATCH`) is a real
 answer, not a whiff. Read every row in `### Source/lane status`; one combined
 verdict must not hide `THIN`, `QUERY-COLLISION`, `SOURCE-MISMATCH`,
-`INFRASTRUCTURE`, or `CONFIG`. If a mechanical shortening still reports
+`INFRASTRUCTURE`, or `CONFIG`; `OK` itself means no required action remains.
+If a mechanical shortening still reports
 `QUERY-COLLISION`, use a semantic re-anchor with different terminology. If research still
 comes back empty after the retry protocol, start the dream stage unseeded
 rather than not at all. Keep the research-quality note in your own Step 6
@@ -161,10 +160,11 @@ Call `mcp__plugin_code-quorum_quorum__q_brainstorm_start` with:
   (those stay behind the anti-bias gate). If several pivots ran, pass the one
   with the strongest cross-domain signal (or concatenate two short ones).
   Omit under `--no-research`, or when the final `Research status:` is still
-  `RETRY-RECOMMENDED` after the retry protocol (known-bad evidence must not
-  anchor the dream stage). `LOW-OVERLAP` on a pivot is expected — seed it. A
-  digest whose status is `OK` with zero hits from domain-legitimate sources
-  also still gets seeded — the zero is itself evidence.
+  `RETRY-REQUIRED` after the retry protocol (known-bad evidence must not
+  anchor the dream stage). Seed `DEGRADED` while preserving its outage
+  disclosure. `LOW-OVERLAP` on a pivot is expected — seed it. A digest whose
+  status is `OK` with zero hits from domain-legitimate sources also still gets
+  seeded — the zero is itself evidence.
 - `verbose`: `false` by default — ideas come back **terse** (tight, no padding). Pass `true` only if the user gave `--verbose`.
 
 Pin `agents` explicitly (don't rely on the server default roster) so the dream
