@@ -18,6 +18,8 @@ from quorum.orchestration import (
     REVIEW_DIFF_MAX_BYTES,
     REVIEW_PROMPT,
     SCOPE_FILE_MAX_BYTES,
+    TREE_DIVERGES_MARKER,
+    TREE_UNVERIFIED_MARKER,
     read_scope_file,
     resolve_doc_path,
     resolve_review_target,
@@ -410,6 +412,183 @@ async def test_bad_pr_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(orchestration, "_run_rc", fake_run_rc)
     with pytest.raises(ValueError):
         await resolve_review_target("pr:999", repo)
+
+
+# --------------------------------------------------------------------------- #
+# working tree vs reviewed change (pr / range targets)
+#
+# A seat that opens a file "to verify" reads the tree in cwd. When cwd is on
+# main and the target is a PR or range, the tree lacks the diff's additions and
+# the seat reports them as missing. The diff must say so up front.
+# --------------------------------------------------------------------------- #
+
+
+def _fake_gh_pr(repo: Path, head_sha: str):
+    """gh stub for pr targets; git calls fall through to the real repo."""
+
+    async def fake_run_rc(cwd: Path, *args: str, timeout: float = 5.0):
+        if args[0] == "git":
+            proc = subprocess.run(list(args), cwd=cwd, capture_output=True, text=True)
+            return proc.returncode, proc.stdout
+        if args[:3] == ("gh", "pr", "view"):
+            if "headRefOid" in args:
+                return 0, head_sha + "\n"
+            return 0, "Title\n\nBody\n"
+        if args[:3] == ("gh", "pr", "diff"):
+            return 0, "diff --git a/a.py b/a.py\n+x = 2\n"
+        return 0, ""
+
+    return fake_run_rc
+
+
+@pytest.mark.asyncio
+async def test_pr_target_warns_when_tree_is_not_at_pr_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+
+    monkeypatch.setattr(orchestration, "shutil_which", lambda _: "/usr/bin/gh")
+    monkeypatch.setattr(orchestration, "_run_rc", _fake_gh_pr(repo, "f" * 40))
+
+    diff, _ = await resolve_review_target("pr:7", repo)
+    assert diff.startswith(TREE_DIVERGES_MARKER)
+    assert "main" in diff.split("\n", 2)[1]  # names the branch cwd sits on
+    assert "head of PR" in diff and "#7" in diff
+    assert "x = 2" in diff
+
+
+@pytest.mark.asyncio
+async def test_pr_target_silent_when_tree_is_at_pr_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+
+    monkeypatch.setattr(orchestration, "shutil_which", lambda _: "/usr/bin/gh")
+    monkeypatch.setattr(orchestration, "_run_rc", _fake_gh_pr(repo, head))
+
+    diff, _ = await resolve_review_target("pr:7", repo)
+    assert TREE_DIVERGES_MARKER not in diff
+    assert diff.startswith("diff --git")
+
+
+@pytest.mark.asyncio
+async def test_range_target_warns_when_tree_is_not_at_range_end(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "b.py", "y = 2\n", "feature work")
+    _git(repo, "checkout", "-q", "main")
+
+    diff, _ = await resolve_review_target("main..feature", repo)
+    assert diff.startswith(TREE_DIVERGES_MARKER)
+    assert "main" in diff.split("\n", 2)[1]
+    assert "main..feature" in diff
+    assert "y = 2" in diff
+
+
+@pytest.mark.asyncio
+async def test_range_target_silent_when_tree_is_at_range_end(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "b.py", "y = 2\n", "feature work")
+
+    diff, _ = await resolve_review_target("main..feature", repo)
+    assert TREE_DIVERGES_MARKER not in diff
+    assert diff.startswith("diff --git")
+
+
+@pytest.mark.asyncio
+async def test_range_target_warns_when_descendant_head_reverted_the_change(
+    tmp_path: Path,
+) -> None:
+    """Ancestry is not proof: a later commit can undo the reviewed lines, so
+    only an exact head match silences the notice."""
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "b.py", "y = 2\n", "feature work")
+    _commit(repo, "b.py", "y = 3\n", "rewrite it")
+
+    diff, _ = await resolve_review_target("main..feature~1", repo)
+    assert diff.startswith(TREE_DIVERGES_MARKER)
+    assert "y = 2" in diff
+
+
+@pytest.mark.asyncio
+async def test_range_target_names_commit_when_head_is_detached(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _commit(repo, "b.py", "y = 2\n", "feature work")
+    _git(repo, "checkout", "-q", "--detach", "main")
+    head = _git(repo, "rev-parse", "HEAD").strip()
+
+    diff, _ = await resolve_review_target("main..feature", repo)
+    first_line = diff.split("\n", 2)[1]
+    assert head[:12] in first_line
+    assert "'HEAD'" not in first_line
+
+
+@pytest.mark.asyncio
+async def test_pr_target_reports_unverified_when_pr_head_unresolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed headRefOid lookup is not proof of divergence; say so."""
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    inner = _fake_gh_pr(repo, "unused")
+
+    async def fake_run_rc(cwd: Path, *args: str, timeout: float = 5.0):
+        if args[:3] == ("gh", "pr", "view") and "headRefOid" in args:
+            return 1, ""
+        return await inner(cwd, *args, timeout=timeout)
+
+    monkeypatch.setattr(orchestration, "shutil_which", lambda _: "/usr/bin/gh")
+    monkeypatch.setattr(orchestration, "_run_rc", fake_run_rc)
+
+    diff, _ = await resolve_review_target("pr:7", repo)
+    assert diff.startswith(TREE_UNVERIFIED_MARKER)
+    assert TREE_DIVERGES_MARKER not in diff
+    assert "x = 2" in diff
+
+
+@pytest.mark.asyncio
+async def test_large_divergent_range_points_seats_at_range_end_not_cwd(
+    tmp_path: Path,
+) -> None:
+    """Over-cap range from a diverged tree: the truncation text must not send
+    seats to cwd, which lacks the additions; it names the reviewed revision."""
+    repo = tmp_path / "r"
+    _init_repo(repo)
+    _commit(repo, "a.py", "x = 1\n", "first")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    big = "y = 0\n" * (REVIEW_DIFF_MAX_BYTES // 4)
+    _commit(repo, "big.py", big, "big feature")
+    _git(repo, "checkout", "-q", "main")
+
+    diff, _ = await resolve_review_target("main..feature", repo)
+    assert diff.startswith(TREE_DIVERGES_MARKER)
+    assert "big.py" in diff
+    assert diff.count("y = 0") < 100
+    assert "git show feature:" in diff
+    assert "read the changed files directly" not in diff
 
 
 # --------------------------------------------------------------------------- #

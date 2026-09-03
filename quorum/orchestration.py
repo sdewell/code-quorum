@@ -515,6 +515,46 @@ def _append_untracked_marker(diff: str, files: list[str]) -> str:
     return f"{diff.rstrip()}\n\n{_untracked_marker(files)}"
 
 
+TREE_DIVERGES_MARKER = "[WORKING TREE IS NOT AT THE REVIEWED CHANGE]"
+TREE_UNVERIFIED_MARKER = "[WORKING TREE ALIGNMENT UNVERIFIED]"
+
+
+async def _tree_diverges_notice(
+    cwd: Path, target_sha: str | None, target_desc: str
+) -> str:
+    """Notice to prepend when cwd's HEAD is not the head of the reviewed
+    change. A seat that opens a file "to verify" reads that tree, sees none
+    of the diff's additions, and reports them as missing (observed twice from
+    a checkout on main reviewing pr:N). Warn unless HEAD provably matches."""
+    rc, head = await _run_rc(cwd, "git", "rev-parse", "HEAD")
+    head = head.strip() if rc == 0 else ""
+    # Exact match only: a descendant of the reviewed head may have reverted
+    # or rewritten the reviewed lines, so ancestry does not prove the tree
+    # holds them. A false warning is cheap; a false silence is the bug.
+    if head and target_sha and head == target_sha:
+        return ""
+    rc, branch = await _run_rc(cwd, "git", "rev-parse", "--abbrev-ref", "HEAD")
+    branch = branch.strip() if rc == 0 else ""
+    where = branch if branch and branch != "HEAD" else head[:12] or "unknown"
+    judge = (
+        "Judge what the change adds, removes, or wires up from the diff below, "
+        "not from the tree: a symbol present in the diff is not missing.\n\n"
+    )
+    if not target_sha:
+        return (
+            f"{TREE_UNVERIFIED_MARKER}\n"
+            f"Could not resolve the head of {target_desc}, so whether the working "
+            f"directory (cwd, at '{where}') contains this diff's additions is "
+            f"unknown. {judge}"
+        )
+    return (
+        f"{TREE_DIVERGES_MARKER}\n"
+        f"The working directory (cwd) is checked out at '{where}', not at the "
+        f"head of {target_desc}. Files on disk may lack this diff's additions. "
+        f"{judge}"
+    )
+
+
 async def _untracked_files(cwd: Path) -> list[str]:
     rc, out = await _run_rc(cwd, "git", "status", "--porcelain")
     if rc != 0:
@@ -528,21 +568,36 @@ async def _untracked_files(cwd: Path) -> list[str]:
 
 
 async def _maybe_truncate_local(
-    cwd: Path, diff: str, *, diff_args: list[str], kind: str
+    cwd: Path,
+    diff: str,
+    *,
+    diff_args: list[str],
+    kind: str,
+    read_at: str | None = None,
 ) -> str:
     """If `diff` fits under the cap, return it. Otherwise replace it with a
-    `git diff --stat` summary + a cwd-pointing marker (local targets resolve
-    against the working tree)."""
+    `git diff --stat` summary + a marker saying where the full files are: cwd
+    (local targets resolve against the working tree), or the revision
+    `read_at` when the working tree is known not to hold the change."""
     if len(diff.encode("utf-8")) <= REVIEW_DIFF_MAX_BYTES:
         return diff
     rc, stat = await _run_rc(cwd, "git", "diff", "--stat", *diff_args)
     summary = stat.strip() if rc == 0 else "(stat unavailable)"
+    if read_at:
+        where = (
+            "The working directory does not hold this change; read the changed "
+            f"files at the reviewed revision: `git show {read_at}:<path>`.\n"
+        )
+    else:
+        where = (
+            "The full files are in the working directory (cwd); read the "
+            "changed files directly to review them.\n"
+        )
     return (
         f"[DIFF TOO LARGE — TRUNCATED ({kind})]\n"
         f"The full diff exceeds {REVIEW_DIFF_MAX_BYTES} bytes. Summary:\n"
         f"{summary}\n\n"
-        "The full files are in the working directory (cwd); read the changed "
-        "files directly to review them.\n"
+        f"{where}"
     )
 
 
@@ -620,7 +675,13 @@ async def resolve_review_target(target: str | None, cwd: Path) -> tuple[str, str
             raise ValueError(f"could not fetch diff for PR #{pr}")
         if not diff.strip():
             return "", f"no changes in PR #{pr}"
-        return await _maybe_truncate_pr(cwd, diff, pr), subject
+        rc_head, pr_head = await _run_rc(
+            cwd, "gh", "pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid"
+        )
+        notice = await _tree_diverges_notice(
+            cwd, pr_head.strip() if rc_head == 0 else None, f"PR #{pr}"
+        )
+        return notice + await _maybe_truncate_pr(cwd, diff, pr), subject
 
     # working → uncommitted tracked changes only.
     if spec == "working":
@@ -673,10 +734,22 @@ async def resolve_review_target(target: str | None, cwd: Path) -> tuple[str, str
             raise ValueError(f"invalid or unresolvable range: {spec}")
         if not diff.strip():
             return "", f"no changes in range {spec}"
-        truncated = await _maybe_truncate_local(
-            cwd, diff, diff_args=[spec], kind="range"
+        end_ref = spec.rsplit("..", 1)[1] or "HEAD"
+        # --verify: without it rev-parse echoes "--end-of-options" as output.
+        rc_end, end_sha = await _run_rc(
+            cwd, "git", "rev-parse", "--verify", "--end-of-options", end_ref
         )
-        return truncated, f"range review {spec}"
+        notice = await _tree_diverges_notice(
+            cwd, end_sha.strip() if rc_end == 0 else None, f"range {spec}"
+        )
+        truncated = await _maybe_truncate_local(
+            cwd,
+            diff,
+            diff_args=[spec],
+            kind="range",
+            read_at=end_ref if notice and rc_end == 0 else None,
+        )
+        return notice + truncated, f"range review {spec}"
 
     raise ValueError(f"unrecognized review target: {spec!r}")
 

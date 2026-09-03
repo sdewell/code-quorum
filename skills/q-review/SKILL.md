@@ -21,6 +21,13 @@ uncommitted). Recognized target forms:
 - `A..B` / `A...B` — an explicit commit range (two-dot literal / three-dot merge-base, PR-like).
 - `all` — the **whole codebase**; agents read the repo at `cwd`. Pair this with `--scope`.
 
+For `pr:N` and range targets, run from a checkout that has the reviewed head
+checked out (a worktree on the PR branch) so file reads and the diff agree.
+When `cwd`'s HEAD is not the reviewed head, the diff is prefixed with a
+working-tree notice telling seats to judge additions from the diff, not the
+tree; without it, seats reading a `main` checkout report the PR's own
+additions as missing.
+
 If the user supplied a `--scope <path>`, capture it for Step 1. When reviewing `all` with **no** scope doc, tell the user a scope doc is strongly recommended and point them at `skills/q-review/references/scope-template.md` (copy it into the repo as `code-quorum-review-scope.md` and pass `--scope code-quorum-review-scope.md`).
 
 If the user supplied `--verbose` or `--gemini-model <id>`, capture them for
