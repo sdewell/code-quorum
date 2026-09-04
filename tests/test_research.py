@@ -122,10 +122,13 @@ def test_format_digest_errors_only_omits_not_found():
 
 
 def test_retry_hint_query_shaped_vs_transient():
-    # A 400/bad-request is the query, not an outage -> shorten-and-resubmit hint.
+    # A surfaced arXiv 400 has already exhausted the in-tool mechanical rework,
+    # so another shortening would repeat the failed recovery.
     q = _retry_hint("arxiv: HTTPStatusError: Client error '400 Bad Request' for url x")
-    assert "shorten" in q.lower()
-    assert "before falling back" in q.lower()
+    assert "could not be mechanically repaired" in q.lower()
+    assert "semantic" in q.lower()
+    assert "re-anchor" in q.lower()
+    assert "shorten" not in q.lower()
     # Anything else (timeout/flake) is transient -> retry as-is (shorten only
     # as a fallback "if it persists", never the lead instruction).
     t = _retry_hint("openalex: TimeoutException: slow")
@@ -149,8 +152,8 @@ def test_format_digest_errors_carry_inline_retry_hint():
     )
     out = format_digest(digest)
     assert "↳" in out
-    # arXiv 400 -> shorten & resubmit before falling back.
-    assert "before falling back" in out.lower()
+    # arXiv 400 -> the internal shortening failed; semantically re-anchor.
+    assert "semantically re-anchor" in out.lower()
     # OpenAlex timeout -> plain retry.
     assert "transient" in out.lower()
 
@@ -707,7 +710,7 @@ async def test_research_topic_threads_limit_into_context7():
     def handler(request):
         if request.url.path.endswith("/search"):
             return httpx.Response(200, text=search)
-        return httpx.Response(200, text="snippet")
+        return httpx.Response(200, text="diffusion snippet")
 
     async with _client(handler) as client:
         digest = await research_topic(
@@ -2444,7 +2447,17 @@ def test_compute_status_off_topic_collision_is_retry():
         errors=(),
         counts=(("arxiv", 3),),
     )
-    assert compute_status(digest).code == "RETRY-REQUIRED"
+    status = compute_status(digest)
+    assert status.code == "RETRY-REQUIRED"
+    assert status.suggested_query == ""
+    assert status.required_actions == (
+        ResearchAction(
+            "RE-ANCHOR",
+            "All sources",
+            "lane-1",
+            "<supply different domain-specific terms>",
+        ),
+    )
 
 
 def test_compute_status_ignores_abstract_less_papers():
@@ -2602,7 +2615,8 @@ def test_compute_status_low_overlap_splits_by_mode():
         counts=(("arxiv", 3),),
     )
     assert compute_status(digest, mode="grounded").code == "RETRY-REQUIRED"
-    assert compute_status(digest, mode="exploratory").code == "LOW-OVERLAP"
+    exploratory = dataclasses.replace(digest, mode="exploratory")
+    assert compute_status(exploratory, mode="exploratory").code == "LOW-OVERLAP"
 
 
 def test_format_digest_opens_with_research_status_line():
@@ -2620,17 +2634,31 @@ def test_format_digest_opens_with_research_status_line():
     assert grounded.splitlines()[0].startswith("Research status: RETRY-REQUIRED")
     explor = format_digest(
         ResearchDigest(
-            topic="DanceGRPO flow matching", papers=off, counts=(("arxiv", 3),)
+            topic="DanceGRPO flow matching",
+            papers=off,
+            counts=(("arxiv", 3),),
+            mode="exploratory",
         ),
         mode="exploratory",
     )
     assert explor.splitlines()[0].startswith("Research status: LOW-OVERLAP")
 
 
+def test_explicit_mode_override_must_match_digest_mode():
+    digest = ResearchDigest(topic="sinkhorn transport", papers=(), mode="exploratory")
+
+    assert compute_status(digest, mode="exploratory") == compute_status(digest)
+    with pytest.raises(ValueError, match="does not match digest mode"):
+        compute_status(digest, mode="grounded")
+    with pytest.raises(ValueError, match="does not match digest mode"):
+        format_digest(digest, mode="grounded")
+
+
 def test_exploratory_combined_status_accepts_cross_domain_lane_overlap():
     digest = ResearchDigest(
         topic="sinkhorn transport",
         papers=(),
+        mode="exploratory",
         source_statuses=(
             SourceLaneStatus(
                 source="openalex",
@@ -2646,6 +2674,384 @@ def test_exploratory_combined_status_accepts_cross_domain_lane_overlap():
     status = compute_status(digest, mode="exploratory")
 
     assert status.code == "LOW-OVERLAP"
+
+
+def test_grounded_mixed_on_topic_and_collision_is_degraded_without_retry_action():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="computational reproducibility",
+                code="ON-TOPIC",
+                detail="candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="europepmc-published",
+                lane="lane-2",
+                query="minimum information reporting provenance",
+                code="QUERY-COLLISION",
+                detail="no candidate vocabulary matches the query lane",
+                count=3,
+            ),
+        ),
+    )
+
+    rendered = format_digest(digest)
+
+    assert rendered.startswith("Research status: DEGRADED")
+    assert "Research needs action: false" in rendered
+    assert "RETRY-SHORTENED" not in rendered
+
+
+def test_zero_count_query_rejection_with_on_topic_peer_requires_reanchor():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="computational reproducibility",
+                code="ON-TOPIC",
+                detail="candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="arxiv",
+                lane="lane-1",
+                query="execution provenance",
+                code="QUERY-COLLISION",
+                detail="could not be mechanically repaired",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert status.required_actions == (
+        ResearchAction(
+            "RE-ANCHOR",
+            "arxiv",
+            "lane-1",
+            "<supply different domain-specific terms>",
+        ),
+    )
+
+
+def test_artifact_hit_cannot_mask_an_all_collision_paper_stratum():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="github",
+                lane="lane-1",
+                query="computational provenance tooling",
+                code="ON-TOPIC",
+                detail="candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="arxiv",
+                lane="lane-1",
+                query="computational provenance literature",
+                code="QUERY-COLLISION",
+                detail="no candidate vocabulary matches the query lane",
+                count=3,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert status.needs_action
+    assert {action.source for action in status.required_actions} == {"arxiv"}
+
+
+def test_grounded_all_collisions_require_semantic_reanchors_not_shortening():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="minimum information experimental reporting provenance",
+                code="QUERY-COLLISION",
+                detail="no candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="europepmc-published",
+                lane="lane-2",
+                query="traceability protocol validation reporting",
+                code="QUERY-COLLISION",
+                detail="no candidate vocabulary matches the query lane",
+                count=3,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert status.suggested_query == ""
+    assert {action.kind for action in status.required_actions} == {"RE-ANCHOR"}
+    assert {action.query for action in status.required_actions} == {
+        "<supply different domain-specific terms>"
+    }
+
+
+def test_collision_and_infrastructure_without_evidence_keep_both_actions():
+    digest = ResearchDigest(
+        topic="execution provenance",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="minimum information reporting provenance",
+                code="QUERY-COLLISION",
+                detail="no candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="github",
+                lane="lane-1",
+                query="computational provenance tooling",
+                code="INFRASTRUCTURE",
+                detail="source failed after its bounded retry",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "RETRY-REQUIRED"
+    assert {(action.source, action.kind) for action in status.required_actions} == {
+        ("openalex", "RE-ANCHOR"),
+        ("github", "RETRY-SAME"),
+    }
+    assert "infrastructure rows retry unchanged" in status.detail
+
+
+def test_paper_rework_keeps_multiple_domain_terms_instead_of_artifact_name():
+    from quorum.research import _query_action
+
+    action = _query_action(
+        "arxiv", "lane-1", "FMCW radar vital signs signal processing"
+    )
+
+    assert action.kind == "RETRY-SHORTENED"
+    assert action.query == "FMCW radar vital"
+
+
+def test_paper_rework_preserves_distinctive_names_before_domain_terms():
+    from quorum.research import _query_action
+
+    action = _query_action(
+        "arxiv", "lane-1", "IP-Adapter FLUX.2 identity preserving adapter survey"
+    )
+
+    assert action.kind == "RETRY-SHORTENED"
+    assert action.query == "IP-Adapter FLUX.2"
+
+
+def test_paper_rework_does_not_pad_two_named_terms_with_a_filler():
+    from quorum.research import _query_action
+
+    action = _query_action(
+        "arxiv", "lane-1", "compare IP-Adapter with FLUX.2 performance"
+    )
+
+    assert action.kind == "RETRY-SHORTENED"
+    assert action.query == "IP-Adapter FLUX.2"
+
+
+@pytest.mark.parametrize("query", ("contrastive learning", "diffusion models"))
+def test_paper_rework_requires_two_scorable_domain_terms(query):
+    from quorum.research import _query_action
+
+    action = _query_action("arxiv", "lane-1", query)
+
+    assert action.kind == "RE-ANCHOR"
+    assert action.query == "<supply different domain-specific terms>"
+
+
+def test_artifact_rework_keeps_distinctive_names():
+    from quorum.research import _query_action
+
+    action = _query_action(
+        "github", "lane-1", "PuLID InstantID identity preserving adapter"
+    )
+
+    assert action.kind == "RETRY-SHORTENED"
+    assert action.query == "PuLID InstantID"
+
+
+def test_aggregate_rework_keeps_distinctive_artifact_names():
+    from quorum.research import _query_action
+
+    action = _query_action(
+        "All sources", "lane-1", "IP-Adapter FLUX.2 identity preserving adapter"
+    )
+
+    assert action.kind == "RETRY-SHORTENED"
+    assert action.query == "IP-Adapter FLUX.2"
+
+
+def test_legacy_all_zero_paper_recovery_uses_paper_rework_with_all_sources_action():
+    digest = ResearchDigest(
+        topic="FMCW radar vital signs signal processing",
+        papers=(),
+        counts=(("arxiv", 0),),
+    )
+
+    status = compute_status(digest)
+
+    assert status.suggested_query == "FMCW radar vital"
+    assert status.required_actions == (
+        ResearchAction("RETRY-SHORTENED", "All sources", "lane-1", "FMCW radar vital"),
+    )
+
+
+def test_legacy_all_zero_paper_recovery_preserves_distinctive_artifact_tokens():
+    digest = ResearchDigest(
+        topic="IP-Adapter FLUX.2 identity preserving adapter survey",
+        papers=(),
+        counts=(("arxiv", 0),),
+    )
+
+    status = compute_status(digest)
+
+    assert status.required_actions == (
+        ResearchAction(
+            "RETRY-SHORTENED",
+            "All sources",
+            "lane-1",
+            "IP-Adapter FLUX.2",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_arxiv_400_retry_retains_multiple_domain_terms():
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(request.url.params["search_query"])
+        return httpx.Response(400, text="bad request")
+
+    async with _client(handler) as client:
+        await research_topic(
+            "FMCW radar vital signs signal processing",
+            sources={"arxiv"},
+            client=client,
+        )
+
+    assert len(calls) == 2
+    assert "vital" in calls[1]
+    assert "radar" in calls[1]
+    assert "fmcw" in calls[1].lower()
+
+
+@pytest.mark.asyncio
+async def test_arxiv_400_retry_preserves_distinctive_artifact_tokens_and_shortens():
+    calls: list[str] = []
+
+    def handler(request):
+        calls.append(request.url.params["search_query"])
+        return httpx.Response(400, text="bad request")
+
+    async with _client(handler) as client:
+        await research_topic(
+            "IP-Adapter FLUX.2 identity preserving adapter survey",
+            sources={"arxiv"},
+            client=client,
+        )
+
+    assert len(calls) == 2
+    assert "IP-Adapter" in calls[1]
+    assert "FLUX.2" in calls[1]
+    assert len(calls[1]) < len(calls[0])
+
+
+@pytest.mark.asyncio
+async def test_research_topic_rejects_reanchor_placeholder_before_dispatch():
+    dispatched = False
+
+    def handler(request):
+        nonlocal dispatched
+        dispatched = True
+        return httpx.Response(200, json={"results": []})
+
+    async with _client(handler) as client:
+        with pytest.raises(ValueError, match="re-anchor placeholder"):
+            await research_topic(
+                "<supply different domain-specific terms>",
+                sources={"openalex"},
+                client=client,
+            )
+
+    assert not dispatched
+
+
+@pytest.mark.asyncio
+async def test_research_topic_rejects_reanchor_placeholder_lane_before_dispatch():
+    dispatched = False
+
+    def handler(request):
+        nonlocal dispatched
+        dispatched = True
+        return httpx.Response(200, json={"results": []})
+
+    async with _client(handler) as client:
+        with pytest.raises(ValueError, match="re-anchor placeholder"):
+            await research_topic(
+                "execution provenance",
+                query_lanes=("<supply different domain-specific terms>",),
+                sources={"openalex"},
+                client=client,
+            )
+
+    assert not dispatched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "query",
+    (
+        "`<SUPPLY DIFFERENT DOMAIN-SPECIFIC TERMS>`",
+        "| <supply different domain-specific terms> |",
+        '"<supply different domain-specific terms>"',
+        "**<supply different domain-specific terms>**",
+        "<supply different domain-specific terms>.",
+        "<supply different domain-specific terms> radar",
+    ),
+)
+async def test_research_topic_rejects_wrapped_reanchor_placeholder_before_dispatch(
+    query,
+):
+    dispatched = False
+
+    def handler(request):
+        nonlocal dispatched
+        dispatched = True
+        return httpx.Response(200, json={"results": []})
+
+    async with _client(handler) as client:
+        with pytest.raises(ValueError, match="re-anchor placeholder"):
+            await research_topic(query, sources={"openalex"}, client=client)
+
+    assert not dispatched
 
 
 @pytest.mark.asyncio
@@ -2692,17 +3098,216 @@ async def test_query_lanes_report_status_per_source_without_hiding_good_lane():
         ("lane-1", "ON-TOPIC"),
         ("lane-2", "QUERY-COLLISION"),
     }
+    assert len(digest.papers) == 3
+    assert all("Cancer biomarker" not in paper.title for paper in digest.papers)
     rendered = format_digest(digest)
-    assert rendered.startswith("Research status: RETRY-REQUIRED")
-    assert "Research needs action: true" in rendered
-    assert (
-        "| RE-ANCHOR | Europe PMC published | lane-2 | "
-        "<supply different domain-specific terms> |" in rendered
-    )
+    assert rendered.startswith("Research status: DEGRADED")
+    assert "Research needs action: false" in rendered
+    assert "### Required research actions" not in rendered
     assert "### Source/lane status" in rendered
     assert "| Europe PMC published | lane-1 | ON-TOPIC |" in rendered
     assert "| Europe PMC published | lane-2 | QUERY-COLLISION |" in rendered
     assert "only 0% of candidates share lane vocabulary" in rendered
+
+
+@pytest.mark.asyncio
+async def test_artifact_collision_keeps_diagnostics_but_excludes_repositories():
+    repos = {
+        "items": [
+            {
+                "full_name": f"org/cancer-biomarker-{index}",
+                "description": "clinical oncology biomarker validation",
+                "stargazers_count": 10 - index,
+                "html_url": f"https://github.com/org/cancer-biomarker-{index}",
+            }
+            for index in range(3)
+        ]
+    }
+
+    async with _client(lambda request: httpx.Response(200, json=repos)) as client:
+        digest = await research_topic(
+            "execution provenance",
+            sources={"github"},
+            client=client,
+        )
+
+    assert digest.repos == ()
+    assert digest.source_statuses == (
+        SourceLaneStatus(
+            source="github",
+            lane="lane-1",
+            query="execution provenance",
+            code="QUERY-COLLISION",
+            detail="only 0% of candidates share lane vocabulary",
+            count=3,
+        ),
+    )
+    status = compute_status(digest)
+    assert status.code == "RETRY-REQUIRED"
+    assert status.required_actions[0].kind == "RE-ANCHOR"
+    rendered = format_digest(digest)
+    assert "| GitHub | lane-1 | QUERY-COLLISION | 3 |" in rendered
+    assert (
+        "GitHub 0 shown after dedup/cap; 3 lane-result candidate(s) rejected "
+        "before dedup/cap" in rendered
+    )
+    assert "_No prior art found._" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_collision_retains_individually_on_topic_papers_and_counts_exclusions():
+    result = [
+        {
+            "id": f"on-topic-{index}",
+            "source": "MED",
+            "title": f"Execution provenance method {index}",
+            "abstractText": "Execution provenance for reproducible experiments.",
+            "pubYear": "2024",
+        }
+        for index in range(2)
+    ] + [
+        {
+            "id": f"off-topic-{index}",
+            "source": "MED",
+            "title": f"Cancer biomarker {index}",
+            "abstractText": "Clinical oncology biomarker validation study.",
+            "pubYear": "2024",
+        }
+        for index in range(3)
+    ]
+
+    async with _client(
+        lambda request: httpx.Response(200, json={"resultList": {"result": result}})
+    ) as client:
+        digest = await research_topic(
+            "execution provenance",
+            sources={"europepmc-published"},
+            client=client,
+        )
+
+    assert digest.source_statuses[0].code == "QUERY-COLLISION"
+    assert digest.source_statuses[0].count == 5
+    assert [paper.identifier for paper in digest.papers] == ["on-topic-0", "on-topic-1"]
+    assert digest.excluded_collision_counts == (("europepmc-published", 3),)
+    rendered = format_digest(digest)
+    assert (
+        "Europe PMC published 2 shown after dedup/cap; 3 lane-result candidate(s) "
+        "rejected before dedup/cap" in rendered
+    )
+
+
+@pytest.mark.asyncio
+async def test_collision_retains_papers_not_used_to_grade_the_lane(monkeypatch):
+    import quorum.research as research_mod
+
+    papers = [
+        _paper(
+            title=f"Cancer biomarker {index}",
+            abstract="Clinical oncology biomarker validation study.",
+            identifier=f"off-topic-{index}",
+        )
+        for index in range(3)
+    ] + [
+        _paper(
+            title="Expanded terminology result",
+            abstract="Alternate vocabulary supplied by the source.",
+            identifier="synonym-expanded",
+            strata=("synonym-expanded",),
+        ),
+        _paper(
+            title="Record without abstract metadata",
+            abstract="",
+            identifier="abstract-missing",
+        ),
+    ]
+
+    async def fake_arxiv(client, query, *, limit, timeout):
+        return papers
+
+    monkeypatch.setattr(research_mod, "search_arxiv", fake_arxiv)
+    async with _client(lambda request: httpx.Response(500)) as client:
+        digest = await research_topic(
+            "execution provenance", sources={"arxiv"}, client=client
+        )
+
+    assert digest.source_statuses[0].code == "QUERY-COLLISION"
+    assert {paper.identifier for paper in digest.papers} == {
+        "synonym-expanded",
+        "abstract-missing",
+    }
+    assert digest.excluded_collision_counts == (("arxiv", 3),)
+
+
+@pytest.mark.asyncio
+async def test_context7_collision_retains_individually_on_topic_libraries(monkeypatch):
+    import quorum.research as research_mod
+
+    libraries = [
+        LibraryDoc(
+            name=f"execution-provenance-{index}",
+            description="execution provenance for reproducible experiments",
+            snippets=(),
+            trust_score=9.0,
+            url=f"https://context7.com/on-topic-{index}",
+        )
+        for index in range(2)
+    ] + [
+        LibraryDoc(
+            name=f"cancer-biomarker-{index}",
+            description="clinical oncology biomarker validation",
+            snippets=(),
+            trust_score=9.0,
+            url=f"https://context7.com/off-topic-{index}",
+        )
+        for index in range(3)
+    ]
+
+    async def fake_context7(client, query, *, timeout, max_libs, token):
+        return libraries
+
+    monkeypatch.setattr(research_mod, "fetch_context7", fake_context7)
+    async with _client(lambda request: httpx.Response(500)) as client:
+        digest = await research_topic(
+            "execution provenance", sources={"context7"}, client=client
+        )
+
+    assert [library.name for library in digest.libraries] == [
+        "execution-provenance-0",
+        "execution-provenance-1",
+    ]
+    assert digest.excluded_collision_counts == (("context7", 3),)
+
+
+@pytest.mark.asyncio
+async def test_exploratory_collision_retains_cross_domain_candidates():
+    result = [
+        {
+            "id": f"cancer-{index}",
+            "source": "MED",
+            "title": f"Cancer biomarker {index}",
+            "abstractText": "A clinical oncology biomarker validation study.",
+            "pubYear": "2024",
+        }
+        for index in range(3)
+    ]
+
+    async with _client(
+        lambda request: httpx.Response(200, json={"resultList": {"result": result}})
+    ) as client:
+        digest = await research_topic(
+            "execution provenance",
+            sources={"europepmc-published"},
+            mode="exploratory",
+            client=client,
+        )
+
+    assert len(digest.papers) == 3
+    assert digest.source_statuses[0].code == "QUERY-COLLISION"
+    assert digest.mode == "exploratory"
+    assert compute_status(digest).code == "LOW-OVERLAP"
+    rendered = format_digest(digest)
+    assert rendered.startswith("Research status: LOW-OVERLAP")
+    assert "rejected before dedup/cap" not in rendered
 
 
 def test_usable_peer_evidence_with_exhausted_infrastructure_is_degraded():
@@ -2739,6 +3344,46 @@ def test_usable_peer_evidence_with_exhausted_infrastructure_is_degraded():
     assert "bounded retry" in status.detail
 
 
+def test_usable_evidence_collision_and_infrastructure_is_degraded_with_outage_detail():
+    digest = ResearchDigest(
+        topic="computational reproducibility",
+        papers=(),
+        source_statuses=(
+            SourceLaneStatus(
+                source="openalex",
+                lane="lane-1",
+                query="computational reproducibility",
+                code="ON-TOPIC",
+                detail="candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="europepmc-published",
+                lane="lane-1",
+                query="minimum reporting provenance",
+                code="QUERY-COLLISION",
+                detail="no candidate vocabulary matches the query lane",
+                count=3,
+            ),
+            SourceLaneStatus(
+                source="arxiv",
+                lane="lane-1",
+                query="computational reproducibility",
+                code="INFRASTRUCTURE",
+                detail="source failed after its bounded retry",
+                count=0,
+            ),
+        ),
+    )
+
+    status = compute_status(digest)
+
+    assert status.code == "DEGRADED"
+    assert not status.needs_action
+    assert status.required_actions == ()
+    assert "bounded retry" in status.detail
+
+
 @pytest.mark.parametrize(
     ("peer_code", "peer_count", "mode"),
     (
@@ -2752,6 +3397,7 @@ def test_any_mode_usable_peer_evidence_with_infrastructure_is_degraded(
     digest = ResearchDigest(
         topic="cross-domain method",
         papers=(),
+        mode=mode,
         source_statuses=(
             SourceLaneStatus(
                 source="github",
@@ -3020,15 +3666,14 @@ async def test_failed_arxiv_shortening_is_not_suggested_again():
             client=client,
         )
 
-    assert digest.source_statuses[0].query == (
-        "computational experiment provenance reproducibility"
-    )
+    assert digest.source_statuses[0].query == ("computational experiment provenance")
+    assert "could not be mechanically repaired" in digest.source_statuses[0].detail
     status = compute_status(digest)
     assert status.code == "RETRY-REQUIRED"
     assert status.suggested_query == ""
 
 
-def test_reworked_suggestion_names_the_colliding_lane():
+def test_collision_action_names_the_colliding_lane_without_shortening():
     digest = ResearchDigest(
         topic="execution provenance",
         papers=(),
@@ -3046,10 +3691,11 @@ def test_reworked_suggestion_names_the_colliding_lane():
 
     rendered = format_digest(digest)
 
-    assert '· try lane-2: "minimum information experimental reporting"' in rendered
+    assert "· try lane-2:" not in rendered
+    assert "| RE-ANCHOR | OpenAlex | lane-2 |" in rendered
 
 
-def test_reworked_suggestion_names_its_own_lane_with_multiple_collisions():
+def test_collision_actions_keep_their_own_lanes_with_multiple_collisions():
     digest = ResearchDigest(
         topic="execution provenance",
         papers=(),
@@ -3075,7 +3721,9 @@ def test_reworked_suggestion_names_its_own_lane_with_multiple_collisions():
 
     rendered = format_digest(digest)
 
-    assert '· try lane-2: "minimum information experimental reporting"' in rendered
+    assert "· try lane-2:" not in rendered
+    assert "| RE-ANCHOR | OpenAlex | lane-1 |" in rendered
+    assert "| RE-ANCHOR | OpenAlex | lane-2 |" in rendered
 
 
 def test_errors_without_usable_evidence_require_retry_instead_of_degrading():
@@ -3398,7 +4046,7 @@ async def test_multi_lane_papers_are_balanced_and_capped_per_source():
 @pytest.mark.asyncio
 async def test_research_topic_auto_retries_arxiv_400_with_shorter_query():
     """An arXiv 400 (query too long / has operators) is mechanically fixable, so
-    research_topic reworks to the distinctive terms and resubmits ONCE inside the
+    research_topic reworks to scorable domain terms and resubmits ONCE inside the
     tool -- the orchestrator never sees the first-attempt failure it would use as
     an excuse to fall back on its own knowledge. The rework is surfaced as a note."""
     xml = (_FIXTURES / "arxiv_sample.xml").read_text()
@@ -3421,7 +4069,7 @@ async def test_research_topic_auto_retries_arxiv_400_with_shorter_query():
     assert digest.papers  # the retry succeeded, so papers came back
     assert len(calls) == 2  # exactly one failure + one retry (not a loop)
     assert not digest.errors  # a repaired source is not reported as unavailable
-    assert any("FLUX.2" in n for n in digest.notes)  # rework surfaced
+    assert any("FLUX.2 identity preserving" in n for n in digest.notes)
 
 
 @pytest.mark.asyncio
@@ -3637,6 +4285,7 @@ async def test_research_topic_populates_field_map_when_requested():
             "sparse signal anomaly detection",
             sources={"arxiv", "openalex"},
             map_fields=True,
+            mode="exploratory",
             client=client,
         )
 
@@ -3700,7 +4349,10 @@ def test_format_digest_annotates_field_in_exploratory_mode_only():
     """Field annotation is skystorm signal -- shown in exploratory mode, kept out
     of the grounded (brainstorm) render to avoid clutter."""
     p = _paper(source="openalex", field="Geophysics")
-    explor = format_digest(ResearchDigest(topic="t", papers=(p,)), mode="exploratory")
+    explor = format_digest(
+        ResearchDigest(topic="t", papers=(p,), mode="exploratory"),
+        mode="exploratory",
+    )
     grounded = format_digest(ResearchDigest(topic="t", papers=(p,)), mode="grounded")
     assert "[field: Geophysics]" in explor
     assert "[field: Geophysics]" not in grounded
@@ -3916,7 +4568,9 @@ def test_on_topic_fraction_normalizes_hyphens():
 def test_format_digest_no_prior_art_excludes_field_map_case():
     """A digest that carries only a field map must not print
     '_No prior art found._' because the field map is a result."""
-    d = ResearchDigest(topic="t", papers=(), field_map=(("Geophysics", 1547),))
+    d = ResearchDigest(
+        topic="t", papers=(), field_map=(("Geophysics", 1547),), mode="exploratory"
+    )
     out = format_digest(d, mode="exploratory")
     assert "_No prior art found._" not in out
     assert "Geophysics" in out

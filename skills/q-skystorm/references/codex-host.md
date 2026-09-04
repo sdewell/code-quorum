@@ -65,7 +65,9 @@ use different `mode` values:
 
 - **Anchor (`mode="grounded"`).** Query the topic's home domain with two or
   more domain terms. Grounded mode makes an off-topic home-domain result
-  `RETRY-REQUIRED`, so fix the anchor before harvesting from it. The overlap
+  `RETRY-REQUIRED`, so fix the anchor before harvesting from it. A partial
+  grounded collision degrades with filtered usable evidence; only no usable
+  anchor evidence remains `RETRY-REQUIRED`. The overlap
   check needs three papers; with one or two, inspect the titles before harvest.
   Form 2–3 semantic `query_lanes` (domain/construct, failure/validity, and
   review/guideline terminology) and use `purpose="methods"`.
@@ -83,20 +85,25 @@ use different `mode` values:
   related field directly before ruling it out.
 
 Act on the digest's `Research status:` line before anything else, and quote it
-verbatim in Step 6. `RETRY-REQUIRED` usually includes a suggested query;
-when it does, resubmit it before concluding there is no prior art. `Research
+verbatim in Step 6. `RETRY-REQUIRED` may include a suggested query for a
+query-shape or all-zero result; when it does, resubmit it before concluding
+there is no prior art. `Research
 needs action: true` and `### Required research actions` list exact operations:
 preserve the query for `RETRY-SAME`, or supply different domain terms for
 `RE-ANCHOR`. `DEGRADED` means a source exhausted its bounded retry but usable
-peer evidence remains; proceed and disclose it without retrying by hand.
+peer evidence remains; for the grounded anchor this means collisions alongside
+usable on-topic rows, including an on-topic paper row when paper sources were
+queried. Proceed on filtered anchor evidence and disclose each rejected
+source/lane row without retrying by hand. Exploratory pivots retain deliberate
+`LOW-OVERLAP` candidates; do not filter them as collisions.
 `LOW-OVERLAP` is expected for a pivot; `CONFIG` is a key/access problem.
 Internal retry notes (`↻`) record a recovered first-attempt failure. A
 domain-legitimate zero is evidence, not a whiff. If
 research remains empty after this protocol, start the dream stage unseeded.
 Read every row in `### Source/lane status`: `ON-TOPIC`, `THIN`,
-`QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`. Use one
-mechanical shortening at most; a repeated `QUERY-COLLISION` requires a semantic
-re-anchor with different terminology. `OK` means no required action remains.
+`QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`.
+`QUERY-COLLISION` is semantic failure: never mechanically shorten it; use a
+semantic re-anchor with different terminology. `OK` means no required action remains.
 
 Read results for portable structure, not literal precedent. A far-flung hit is
 the find when it shares structural kinship: a transferable data shape or

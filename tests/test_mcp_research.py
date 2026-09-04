@@ -44,10 +44,26 @@ async def test_q_research_passes_purpose_and_semantic_query_lanes(monkeypatch):
     )
 
     assert seen["purpose"] == "currency"
+    assert seen["mode"] == "grounded"
     assert seen["query_lanes"] == (
         "computational experiment provenance",
         "minimum information reporting provenance",
     )
+
+
+@pytest.mark.asyncio
+async def test_q_research_passes_exploratory_mode_into_retrieval(monkeypatch):
+    seen = {}
+
+    async def fake_research_topic(topic, **kw):
+        seen.update(kw)
+        return ResearchDigest(topic=topic, papers=())
+
+    monkeypatch.setattr(server, "research_topic", fake_research_topic)
+    await server.q_research("sinkhorn transport", mode="exploratory")
+
+    assert seen["mode"] == "exploratory"
+    assert seen["map_fields"] is True
 
 
 def test_q_research_docstring_demands_domain_anchored_query():
@@ -96,6 +112,14 @@ def test_q_research_docstring_routes_exact_required_actions():
     assert "executable query" in low
     assert "re-anchor row" in low
     assert "different domain" in low
+
+
+def test_q_research_docstring_distinguishes_collision_reanchor_from_degraded():
+    doc = " ".join((server.q_research.__doc__ or "").split())
+    assert "QUERY-COLLISION is semantic failure" in doc
+    assert "never mechanically shorten it" in doc
+    assert "filtered usable evidence" in doc
+    assert "All-collision results are" in doc
 
 
 @pytest.mark.asyncio

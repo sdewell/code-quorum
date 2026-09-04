@@ -67,6 +67,27 @@ def test_select_agents_default_roster_skips_disabled_seat() -> None:
     assert skipped == ["codex"]
 
 
+def test_select_agents_default_roles_ignore_disabled_roster_target() -> None:
+    mc.record_choice("opencode", {"disabled": "true"})
+    chosen, skipped = select_agents(
+        None,
+        roles=["skeptic:opencode", "architect:gemini", "neutral:codex"],
+        host="claude",
+    )
+    assert "opencode" in skipped
+    assert {agent.name for agent in chosen} == {"codex", "gemini"}
+
+
+def test_select_agents_explicit_roles_still_reject_omitted_target() -> None:
+    mc.record_choice("opencode", {"disabled": "true"})
+    with pytest.raises(ValueError, match="opencode"):
+        select_agents(
+            ["codex", "gemini"],
+            roles=["skeptic:opencode"],
+            host="claude",
+        )
+
+
 def test_select_agents_explicit_agent_list_still_runs_disabled_seat() -> None:
     """An explicit --agent/agents=[...] ask is a deliberate override: it
     must still be able to run a seat the user marked disabled, and nothing

@@ -68,7 +68,9 @@ far-afield domains come back *from the literature* instead of your own priors.
 - **Anchor (`mode="grounded"`).** One query in the topic's home domain (2+
   domain terms, the normal not-a-bare-word bar — the tool refuses a generic
   one outright). Use **grounded** so an off-topic home-domain result trips
-  `RETRY-REQUIRED` and you fix the anchor *before* harvesting from it —
+  `RETRY-REQUIRED` and you fix the anchor *before* harvesting from it. A partial
+  grounded collision degrades with filtered usable evidence; only no usable
+  anchor evidence remains `RETRY-REQUIRED` —
   exploratory mode would accept a bad anchor as `LOW-OVERLAP` and its
   contaminated vocabulary would poison every pivot term you pull. The
   overlap check needs ≥3 papers to fire, so if the anchor returns only one
@@ -105,13 +107,17 @@ far-afield domains come back *from the literature* instead of your own priors.
 
 **Act on the `Research status:` line** (the digest's first line) before
 anything else, and **quote it verbatim** in your Step 6 narration:
-`RETRY-REQUIRED` **usually** carries a suggested query (shown as
-`· try: "…"`) — when present, resubmit it before concluding "no prior art".
+`RETRY-REQUIRED` may carry a suggested query for a query-shape or all-zero
+result (shown as `· try: "…"`) — when present, resubmit it before concluding
+"no prior art".
 `Research needs action: true` and `### Required research actions` list every
 exact operation: preserve the query for `RETRY-SAME`, or supply different
 domain terms for `RE-ANCHOR`. `DEGRADED` means a source exhausted its bounded,
-delayed retry but usable peer evidence remains; proceed and disclose it without
-repeating the mechanical retry by hand. `LOW-OVERLAP` is expected for a pivot
+delayed retry but usable peer evidence remains; this includes collisions beside
+usable on-topic rows, including an on-topic paper row when paper sources were
+queried. Proceed on filtered anchor evidence and disclose each rejected
+source/lane row without repeating the mechanical retry by hand. Exploratory pivots retain deliberate
+`LOW-OVERLAP` candidates; do not filter them as collisions. `LOW-OVERLAP` is expected for a pivot
 and needs no retry; `CONFIG` is a key/access problem no retry fixes.
 Mechanically-fixable failures are retried inside the tool — a `↻` note means a
 first-attempt error was handled, not hidden. A domain-legitimate 0 (GitHub/HuggingFace on a
@@ -119,8 +125,8 @@ non-software topic or another source marked `SOURCE-MISMATCH`) is a real
 answer, not a whiff. Read every row in `### Source/lane status`; one combined
 verdict must not hide `THIN`, `QUERY-COLLISION`, `SOURCE-MISMATCH`,
 `INFRASTRUCTURE`, or `CONFIG`; `OK` itself means no required action remains.
-If a mechanical shortening still reports
-`QUERY-COLLISION`, use a semantic re-anchor with different terminology. If research still
+`QUERY-COLLISION` is semantic failure: never mechanically shorten it; use a
+semantic re-anchor with different terminology. If research still
 comes back empty after the retry protocol, start the dream stage unseeded
 rather than not at all. Keep the research-quality note in your own Step 6
 narration, never in the dream pool itself in Step 5, which stays

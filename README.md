@@ -54,7 +54,7 @@ forms below to select one explicitly:
 
 | Option | Effect |
 |---|---|
-| `--extended` | Adds another divergence round for host brainstorming, or expands validation/review to 4 rounds with a stance rotation. |
+| `--extended` | Two-pass host brainstorm (visionary/pioneer/architect, then analyst/maintainer/skeptic), or validation/review in 4 rounds with stance rotation. |
 | `--mode critique` | Makes later validation/review rounds attack peer positions instead of revising toward agreement. |
 | `--scope <doc>` | Declares in-bounds, out-of-bounds, and accepted-risk areas for a whole-codebase review. |
 | `--exploratory` | Makes host research hunt for cross-domain analogies instead of direct prior art. |

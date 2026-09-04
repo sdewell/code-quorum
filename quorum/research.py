@@ -141,6 +141,11 @@ class ResearchDigest:
     # legacy/manual digests, whose combined status still uses the aggregate
     # fallback in `compute_status`.
     source_statuses: tuple[SourceLaneStatus, ...] = ()
+    # Candidates removed from grounded collision lanes, grouped by source.
+    excluded_collision_counts: tuple[tuple[str, int], ...] = ()
+    # The retrieval mode determines whether lexical collisions are rejected
+    # (grounded) or retained as deliberate cross-domain evidence (exploratory).
+    mode: str = "grounded"
 
 
 def _truncate(text: str, limit: int = _ABSTRACT_MAX_CHARS) -> str:
@@ -272,8 +277,9 @@ def _retry_hint(error: str) -> str:
       checked first (see _is_arxiv_rate_refusal for why).
     - arXiv 200 with any OTHER non-feed body (proxy/block page) -- transient,
       but pinned before the config cases so its snippet cannot flip the class.
-    - arXiv 400 bad request -- the QUERY (too long or boolean-punctuated).
-      Shorten and resubmit.
+    - arXiv 400 bad request -- the in-tool mechanical query rework was either
+      impossible or also rejected. Semantically re-anchor rather than shortening
+      again.
     - 401 / 403 -- the KEY, not the query or the backend. Retrying is futile.
     - 409 on OpenAlex -- anonymous demo credits are exhausted; a key is required.
     - 503 on OpenAlex -- it load-sheds ANONYMOUS search under load and says so,
@@ -297,9 +303,8 @@ def _retry_hint(error: str) -> str:
         return _TRANSIENT_HINT
     if _is_arxiv_query_error(low):
         return (
-            "likely query too long or has boolean operators — shorten to a few "
-            "distinctive keywords, strip punctuation, and call q_research again "
-            "before falling back to your own knowledge"
+            "the query could not be mechanically repaired — semantically re-anchor "
+            "with different domain terminology before calling q_research again"
         )
     if _is_auth_error(low):
         return (
@@ -324,14 +329,16 @@ def _retry_hint(error: str) -> str:
     return _TRANSIENT_HINT
 
 
-def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
+def format_digest(digest: ResearchDigest, *, mode: str | None = None) -> str:
     """Render a digest as prompt-safe markdown. Opens with a deterministic
     `Research status:` verdict line (see `compute_status`) so the consumer meets
     the quality judgment before any result and can act on RETRY-REQUIRED
     before falling back. Failed sources appear under 'Sources unavailable' --
     each with an inline retry hint -- and a per-source count footer makes a
-    queried-but-empty source visible. `mode` ('grounded'|'exploratory') is
-    passed through to the verdict."""
+    queried-but-empty source visible. When omitted, `mode` is the retrieval
+    mode stored on the digest; an explicit value asserts that the caller's
+    expected mode matches the retrieval mode."""
+    mode = digest.mode if mode is None else mode
     status = compute_status(digest, mode=mode)
     status_line = f"Research status: {status.code} — {status.detail}"
     if status.suggested_query:
@@ -447,15 +454,19 @@ def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
             lines.append(f"- {err}")
             lines.append(f"  ↳ {_retry_hint(err)}")
         lines.append("")
-    if not any(
-        (
-            digest.papers,
-            digest.libraries,
-            digest.repos,
-            digest.models,
-            digest.errors,
-            digest.field_map,
+    excluded_collision_counts = dict(digest.excluded_collision_counts)
+    if (
+        not any(
+            (
+                digest.papers,
+                digest.libraries,
+                digest.repos,
+                digest.models,
+                digest.errors,
+                digest.field_map,
+            )
         )
+        and not excluded_collision_counts
     ):
         lines.append("_No prior art found._")
         lines.append("")
@@ -476,7 +487,17 @@ def format_digest(digest: ResearchDigest, *, mode: str = "grounded") -> str:
     if digest.notes:
         lines.append("")
     if digest.counts:
-        parts = [f"{_SOURCE_LABELS.get(s, s)} {n}" for s, n in digest.counts]
+        parts = []
+        for source, retained in digest.counts:
+            label = _SOURCE_LABELS.get(source, source)
+            excluded = excluded_collision_counts.get(source, 0)
+            if excluded:
+                parts.append(
+                    f"{label} {retained} shown after dedup/cap; {excluded} "
+                    "lane-result candidate(s) rejected before dedup/cap"
+                )
+            else:
+                parts.append(f"{label} {retained}")
         paper_found = sum(n for s, n in digest.counts if s in _PAPER_SOURCES)
         dropped = paper_found - len(digest.papers)
         footer = "_Sources queried: " + ", ".join(parts)
@@ -1574,6 +1595,26 @@ def _on_topic_fraction(texts: Iterable[str], query: str) -> float | None:
     ) / len(texts)
 
 
+def _candidate_is_on_topic(
+    candidate: Paper | LibraryDoc | Repo | HFModel, query: str
+) -> bool:
+    """Apply the lane's coverage rule to one candidate before grounded filtering."""
+    terms = set(_scorable_terms(query))
+    if not terms:
+        return False
+    if isinstance(candidate, Paper):
+        if "synonym-expanded" in candidate.strata or not candidate.abstract.strip():
+            return True
+        text = f"{candidate.title} {candidate.abstract}"
+    elif isinstance(candidate, LibraryDoc):
+        text = " ".join((candidate.name, candidate.description, *candidate.snippets))
+    elif isinstance(candidate, Repo):
+        text = f"{candidate.name} {candidate.description}"
+    else:
+        text = candidate.id
+    return len(_match_tokens(text) & terms) >= _required_matches(len(terms))
+
+
 _ON_TOPIC_MIN = 0.5  # below this fraction of on-topic hits, a query is suspect
 _MIN_SCORING_HITS = 3  # too few hits to judge overlap; don't flag on 1-2 papers
 
@@ -1654,6 +1695,13 @@ class ResearchAction:
 _REANCHOR_QUERY = "<supply different domain-specific terms>"
 
 
+def _is_reanchor_placeholder(query: str) -> bool:
+    def words(text: str) -> str:
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", text.casefold()).split())
+
+    return words(_REANCHOR_QUERY) in words(query)
+
+
 @dataclass(frozen=True)
 class ResearchStatus:
     """The deterministic quality verdict rendered as the digest's first line.
@@ -1686,12 +1734,14 @@ def _required_actions(rows: Iterable[SourceLaneStatus]) -> tuple[ResearchAction,
             continue
         if row.code != "QUERY-COLLISION":
             continue
-        actions.append(_query_action(row.source, row.lane, row.query))
+        actions.append(
+            ResearchAction("RE-ANCHOR", row.source, row.lane, _REANCHOR_QUERY)
+        )
     return tuple(actions)
 
 
 def _query_action(source: str, lane: str, query: str) -> ResearchAction:
-    reworked = _rework(query)
+    reworked = _rework(source, query)
     return ResearchAction(
         "RETRY-SHORTENED" if reworked else "RE-ANCHOR",
         source,
@@ -1708,7 +1758,12 @@ def _query_actions(rows: Iterable[SourceLaneStatus]) -> tuple[ResearchAction, ..
         if key in seen:
             continue
         seen.add(key)
-        actions.append(_query_action(row.source, row.lane, row.query))
+        if row.code == "QUERY-COLLISION":
+            actions.append(
+                ResearchAction("RE-ANCHOR", row.source, row.lane, _REANCHOR_QUERY)
+            )
+        else:
+            actions.append(_query_action(row.source, row.lane, row.query))
     return tuple(actions)
 
 
@@ -1727,7 +1782,9 @@ def _source_lane_status(
             detail = "credential or source configuration rejected the request"
         elif error_class == "query":
             code = "QUERY-COLLISION"
-            detail = "mechanical shortening failed; use a semantic re-anchor"
+            detail = (
+                "query could not be mechanically repaired; use a semantic re-anchor"
+            )
         else:
             code = "INFRASTRUCTURE"
             detail = "source failed after its bounded retry"
@@ -1831,7 +1888,10 @@ def _error_class(error: str) -> str:
     return "transient"
 
 
-def _rework(query: str) -> str:
+_REWORK_FILLERS = frozenset({"compare", "overview", "survey", "towards", "using"})
+
+
+def _rework(source: str, query: str) -> str:
     """A resubmittable reworked query, or "" when reworking would just return the
     original. The skill MANDATES retrying with a non-empty suggestion.
     Returning the identical query would loop forever, so an empty result tells
@@ -1840,12 +1900,30 @@ def _rework(query: str) -> str:
     ('Diffusion' -> 'diffusion', 'a  b' -> 'a b') is not a meaningful rework and
     must not cost a retry (round-2/3 review); comparing the raw strings would
     loop forever on such a query."""
-    # Shorter, sharper query to resubmit: the distinctive artifact-name terms
-    # if the topic has any, else its scorable domain words, capped. Empty only
-    # when the topic is entirely stopwords -- which Layer-1 lint refuses
-    # upstream.
-    terms = _distinctive_terms(query) or _scorable_terms(query)
-    shorter = " ".join(terms[:_MAX_DISTINCTIVE_TERMS])
+    # Paper searches need enough domain vocabulary to remain anchored, while
+    # artifact-like terms retain their spelling so name-indexed backends can
+    # still find them. Aggregate paper recovery uses the same compact shape.
+    paper_rework = source in _PAPER_SOURCES or source == "All sources"
+    scorable = _scorable_terms(query)
+    if paper_rework:
+        if len(scorable) < 2:
+            return ""
+        distinctive = _distinctive_terms(query)
+        terms: list[str] = list(distinctive)
+        covered: set[str] = set()
+        for term in distinctive:
+            covered.update(_match_tokens(term))
+        if len(distinctive) < 2:
+            for term in scorable:
+                if term not in covered and term not in _REWORK_FILLERS:
+                    terms.append(term)
+                    covered.add(term)
+        shorter = " ".join(terms[:3])
+        if len(_scorable_terms(shorter)) < 2:
+            return ""
+    else:
+        terms = _distinctive_terms(query) or scorable
+        shorter = " ".join(terms[:_MAX_DISTINCTIVE_TERMS])
 
     def canonical(q: str) -> str:
         return " ".join(q.lower().split())
@@ -1854,13 +1932,14 @@ def _rework(query: str) -> str:
 
 
 def compute_status(
-    digest: "ResearchDigest", *, mode: str = "grounded"
+    digest: "ResearchDigest", *, mode: str | None = None
 ) -> ResearchStatus:
     """Derive the quality verdict from a completed digest. `mode` is 'grounded'
     (brainstorm: a low on-topic score is a defect -> RETRY-REQUIRED) or
     'exploratory' (skystorm: a low score is reported as LOW-OVERLAP but never
     forces a retry, because a deliberate cross-domain probe is expected to read
-    off-domain).
+    off-domain). When supplied, `mode` asserts the digest's retrieval mode; it
+    does not reinterpret retained or filtered candidates.
 
     Precedence: a CONFIG error (rejected key / anonymous load-shed) outranks
     everything -- a retry cannot fix it, so it must not be mistaken for a bad
@@ -1869,10 +1948,16 @@ def compute_status(
     never OK. Then low lexical overlap. Otherwise OK. The zero-legitimacy cases
     Source mismatches never trip a retry when a peer source found on-topic work;
     they are explicit rows rather than hidden in the aggregate."""
-    if mode not in ("grounded", "exploratory"):
+    if digest.mode not in ("grounded", "exploratory"):
         raise ValueError(
-            f"Unknown research mode {mode!r}; expected 'grounded' or 'exploratory'."
+            f"Unknown research mode {digest.mode!r}; expected 'grounded' or "
+            "'exploratory'."
         )
+    if mode is not None and mode != digest.mode:
+        raise ValueError(
+            f"Explicit mode {mode!r} does not match digest mode {digest.mode!r}."
+        )
+    mode = digest.mode
     if digest.source_statuses:
         counts: dict[str, int] = {}
         for row in digest.source_statuses:
@@ -1887,6 +1972,9 @@ def compute_status(
                 + "; retry will not fix the rejected credential or access policy -- "
                 "set the source key or proceed on the other sources and say so",
             )
+        collisions = tuple(
+            row for row in digest.source_statuses if row.code == "QUERY-COLLISION"
+        )
         paper_rows = [
             row for row in digest.source_statuses if row.source in _PAPER_SOURCES
         ]
@@ -1912,32 +2000,47 @@ def compute_status(
                 suggested_lane=suggested_action.lane if suggested_action else "",
                 required_actions=actions,
             )
-        collisions = tuple(
-            row for row in digest.source_statuses if row.code == "QUERY-COLLISION"
+        on_topic_rows = [
+            row for row in digest.source_statuses if row.code == "ON-TOPIC"
+        ]
+        usable_on_topic = (
+            any(row.code == "ON-TOPIC" for row in paper_rows)
+            if paper_rows
+            else bool(on_topic_rows)
         )
-        if collisions and mode == "grounded":
-            actions = _required_actions(collisions)
-            suggested_action = next(
-                (action for action in actions if action.kind == "RETRY-SHORTENED"),
-                None,
+        if (
+            collisions
+            and all(row.count > 0 for row in collisions)
+            and usable_on_topic
+            and mode == "grounded"
+        ):
+            return ResearchStatus(
+                "DEGRADED",
+                summary + "; rejected colliding source/lane attempts while retaining "
+                "the usable on-topic evidence"
+                + (
+                    "; one or more sources exhausted their bounded retry"
+                    if counts.get("INFRASTRUCTURE")
+                    else ""
+                ),
             )
-            reworked = suggested_action.query if suggested_action else ""
+        if collisions and mode == "grounded":
+            actions = _required_actions(
+                row
+                for row in digest.source_statuses
+                if row.code in ("QUERY-COLLISION", "INFRASTRUCTURE")
+            )
             detail = (
                 summary
-                + "; "
-                + (
-                    "try the suggested mechanical shortening once; if it still "
-                    "collides, semantically re-anchor with different terminology"
-                    if reworked
-                    else "mechanical shortening is exhausted; semantically re-anchor "
-                    "with different domain terminology"
-                )
+                + "; semantic collisions or unrepaired query rejections require "
+                "the caller to semantically re-anchor with different domain "
+                "terminology"
             )
+            if counts.get("INFRASTRUCTURE"):
+                detail += "; infrastructure rows retry unchanged as listed"
             return ResearchStatus(
                 "RETRY-REQUIRED",
                 detail,
-                suggested_query=reworked,
-                suggested_lane=suggested_action.lane if suggested_action else "",
                 required_actions=actions,
             )
         if counts.get("INFRASTRUCTURE"):
@@ -2027,7 +2130,7 @@ def compute_status(
                     for source in sorted(paper_failed)
                 ),
             )
-        reworked = _rework(digest.topic)
+        reworked = _rework("All sources", digest.topic)
         detail = "every paper source returned 0 on a valid query -- " + (
             "resubmit the suggested query before falling back to your own knowledge"
             if reworked
@@ -2053,19 +2156,15 @@ def compute_status(
                 "was a deliberate cross-domain probe; otherwise re-anchor with "
                 "more domain context",
             )
-        reworked = _rework(digest.topic)
-        detail = f"only {pct}% of hits are on-topic -- the query likely collided " + (
-            "with unrelated work; re-anchor with the suggested query and resubmit"
-            if reworked
-            else "with unrelated work; re-anchor with DIFFERENT domain-specific "
-            "terms (your judgment) and resubmit -- do not resubmit the same query"
+        detail = (
+            f"only {pct}% of hits are on-topic -- the query likely collided with "
+            "unrelated work; re-anchor with DIFFERENT domain-specific terms "
+            "(your judgment) and resubmit -- do not mechanically shorten it"
         )
-        action = _query_action("All sources", "lane-1", digest.topic)
+        action = ResearchAction("RE-ANCHOR", "All sources", "lane-1", _REANCHOR_QUERY)
         return ResearchStatus(
             "RETRY-REQUIRED",
             detail,
-            suggested_query=reworked,
-            suggested_lane="lane-1" if reworked else "",
             required_actions=(action,),
         )
     if digest.errors:
@@ -2199,7 +2298,7 @@ async def _contained(name: str, factory, query: str):
     The retry is deliberate, not a blanket loop -- the class of the first error
     decides (see `_error_class`):
     - 'query' (arXiv 400): the query is malformed. Resubmit ONCE with the
-      auto-shortened distinctive-term query -- the same fix the retry hint asks
+      auto-shortened scorable-domain-term query -- the same fix the retry hint asks
       the consumer to make, done here so a first-attempt 400 never reaches the
       orchestrator as an excuse to fall back on its own knowledge.
     - 'rate' (arXiv's 200-with-'Rate exceeded' refusal, or a 429): resubmit
@@ -2219,7 +2318,7 @@ async def _contained(name: str, factory, query: str):
         if cls == "config":
             return name, None, err, None, attempt_query
         if cls == "query":
-            reworked = _rework(query)
+            reworked = _rework(name, query)
             if not reworked:
                 # Nothing left to rework -- `_rework` folds case and whitespace,
                 # so a case-/spacing-only 'shorter' query never triggers a
@@ -2265,19 +2364,26 @@ async def research_topic(
     github_token: str | None = None,
     hf_token: str | None = None,
     map_fields: bool = False,
+    mode: str = "grounded",
     purpose: str = "methods",
     client: httpx.AsyncClient | None = None,
 ) -> ResearchDigest:
     """Query the selected sources concurrently and return a deduped digest. Each
-    source is failure-isolated; errors land in digest.errors. When `map_fields`
-    is set and OpenAlex is a source, one extra concurrent group_by call fills
-    digest.field_map with the subfield distribution (the skystorm topology
-    readout); a failure there degrades to an empty map, never sinks the digest.
+    source is failure-isolated; errors land in digest.errors. Grounded mode
+    excludes candidates from lexically colliding attempts; exploratory mode
+    retains them as possible cross-domain evidence. When `map_fields` is set and
+    OpenAlex is a source, one extra concurrent group_by call fills digest.field_map
+    with the subfield distribution (the skystorm topology readout); a failure
+    there degrades to an empty map, never sinks the digest.
     Pass `client` (for example, a MockTransport-backed one) for testing;
     otherwise a short-lived AsyncClient is created and closed here. Context7,
     GitHub, and Hugging Face tokens are read from the environment when not
     passed. All provider tokens are sent only as Bearer headers."""
     sources = validate_sources(sources)
+    if mode not in ("grounded", "exploratory"):
+        raise ValueError(
+            f"Unknown research mode {mode!r}; expected 'grounded' or 'exploratory'."
+        )
     if purpose not in RESEARCH_PURPOSES:
         raise ValueError(
             f"Unknown research purpose {purpose!r}; expected one of "
@@ -2288,6 +2394,11 @@ async def research_topic(
     if limit > _MAX_LIMIT:
         raise ValueError(f"limit must be <= {_MAX_LIMIT}, got {limit}.")
     topic = " ".join(topic.split())
+    if _is_reanchor_placeholder(topic):
+        raise ValueError(
+            "Research topic is a re-anchor placeholder; supply different "
+            "domain-specific terms before calling research."
+        )
     if not _scorable_terms(topic):
         raise ValueError(
             f"Research topic {topic!r} has no distinctive terms to search on -- "
@@ -2301,6 +2412,11 @@ async def research_topic(
     seen_lanes: set[str] = set()
     for raw_query in raw_lanes:
         query = " ".join(raw_query.split())
+        if _is_reanchor_placeholder(query):
+            raise ValueError(
+                "Research query lane is a re-anchor placeholder; supply different "
+                "domain-specific terms before calling research."
+            )
         canonical = query.lower()
         if not _scorable_terms(query):
             raise ValueError(
@@ -2444,11 +2560,13 @@ async def research_topic(
     successful_sources: set[str] = set()
     notes: list[str] = []
     source_statuses: list[SourceLaneStatus] = []
+    excluded_collision_by_source: dict[str, int] = {}
     paper_groups: dict[str, list[tuple[str, list[Paper]]]] = {}
     for lane, query, name, value, err, note in results:
         if note:
             notes.append(_redact(f"{name} [{lane}]: {note}", secrets))
-        source_statuses.append(_source_lane_status(name, lane, query, value or [], err))
+        row = _source_lane_status(name, lane, query, value or [], err)
+        source_statuses.append(row)
         if err is not None:
             labelled = err.replace(f"{name}:", f"{name}: [{lane}]", 1)
             errors.append(_redact(labelled, secrets))
@@ -2456,6 +2574,18 @@ async def research_topic(
         if value is None:
             continue
         successful_sources.add(name)
+        if row.code == "QUERY-COLLISION" and mode == "grounded":
+            retained = [
+                candidate
+                for candidate in value
+                if _candidate_is_on_topic(candidate, query)
+            ]
+            excluded = len(value) - len(retained)
+            if excluded:
+                excluded_collision_by_source[name] = (
+                    excluded_collision_by_source.get(name, 0) + excluded
+                )
+            value = retained
         if name == "context7":
             libraries.extend(cast(list[LibraryDoc], value))
         elif name == "github":
@@ -2542,4 +2672,6 @@ async def research_topic(
         notes=tuple(notes),
         field_map=tuple(field_map),
         source_statuses=tuple(source_statuses),
+        excluded_collision_counts=tuple(excluded_collision_by_source.items()),
+        mode=mode,
     )

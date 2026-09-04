@@ -434,10 +434,16 @@ async def q_research(
     result limit remains a per-source cap across all lanes.
 
     Each lane must be short and distinctive -- short is not the same as generic.
-    Anchor it in 2+ domain-specific terms. Generic or off-topic lanes should
-    re-anchor and call q_research again. For same-domain work, returned titles
-    should belong to your domain. For a deliberate cross-domain probe, judge
-    structural kinship instead; an off-domain hit can be the intended find.
+    Anchor ordinary concept lanes in 2+ domain-specific terms. A single named
+    artifact or method is valid when it is the actual target. Generic or
+    off-topic lanes should re-anchor and call q_research again. QUERY-COLLISION is semantic failure:
+    never mechanically shorten it. Collisions alongside usable ON-TOPIC evidence
+    are DEGRADED and proceed on filtered usable evidence; when paper sources were
+    queried, usable evidence requires an ON-TOPIC paper row. All-collision
+    results are RETRY-REQUIRED and need a semantic re-anchor. For same-domain
+    work, returned titles should belong to your domain. For a deliberate
+    cross-domain probe, judge structural kinship instead; an off-domain hit can
+    be the intended find.
 
     The digest opens with `Research status:` and a `Source/lane status` table.
     Each row is ON-TOPIC, THIN, QUERY-COLLISION, SOURCE-MISMATCH,
@@ -473,10 +479,11 @@ async def q_research(
         sources=set(chosen),
         limit=limit,
         map_fields=mode == "exploratory",
+        mode=mode,
         purpose=purpose,
         query_lanes=tuple(query_lanes) if query_lanes else None,
     )
-    return format_digest(digest, mode=mode)
+    return format_digest(digest)
 
 
 @mcp.tool()

@@ -2,12 +2,14 @@
 catch drift between the slash-command prose and the tool names/params
 exposed by quorum_mcp.server."""
 
+import ast
 import inspect
+import re
 from pathlib import Path
 
 import pytest
 
-from quorum.orchestration import OUT_OF_SCOPE_TAG
+from quorum.orchestration import OUT_OF_SCOPE_TAG, select_agents
 from quorum_mcp.server import q_await
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
@@ -444,6 +446,77 @@ def test_q_research_skill_requires_semantic_lanes_and_per_lane_statuses() -> Non
         assert status in text
     assert "semantic re-anchor" in flat
     assert "mechanical shortening" in flat
+
+
+def test_extended_brainstorm_uses_host_specific_two_pass_roles() -> None:
+    text = " ".join(_skill("q-brainstorm").split())
+    second = text.split("## Step 6", 1)[1]
+
+    def extract(pattern: str, source: str) -> str:
+        match = re.search(pattern, source)
+        assert match is not None
+        return match.group(1)
+
+    patterns = {
+        "claude_r1": r"forward-but-structured pass: on Claude Code pass `(\[.*?\])`",
+        "codex_r1": r"forward-but-structured pass:.*?on Codex pass `(\[.*?\])`",
+        "claude_r2": (
+            r"grounded divergence roles for this second call: "
+            r"on Claude Code use `(\[.*?\])`"
+        ),
+        "codex_r2": (
+            r"grounded divergence roles for this second call:.*?"
+            r"on Codex use `(\[.*?\])`"
+        ),
+    }
+    roles = {
+        key: extract(pattern, second if key.endswith("r2") else text)
+        for key, pattern in patterns.items()
+    }
+    assert roles == {
+        "claude_r1": '["visionary:codex", "pioneer:gemini", "architect:opencode"]',
+        "codex_r1": '["visionary:claude", "pioneer:gemini", "architect:opencode"]',
+        "claude_r2": '["analyst:codex", "maintainer:gemini", "skeptic:opencode"]',
+        "codex_r2": '["analyst:claude", "maintainer:gemini", "skeptic:opencode"]',
+    }
+    for host, names in (
+        ("claude", ["codex", "gemini", "opencode"]),
+        ("codex", ["claude", "gemini", "opencode"]),
+    ):
+        for round_name in ("r1", "r2"):
+            resolved_roles = ast.literal_eval(roles[f"{host}_{round_name}"])
+            selected = select_agents(names, roles=resolved_roles, host=host)
+            assert {agent.name: agent.role for agent in selected.agents} == {
+                assignment.split(":", 1)[1]: assignment.split(":", 1)[0]
+                for assignment in resolved_roles
+            }
+    assert "retains `prior_ideas`" in second
+    assert "never sets `grounding=true`" in second
+    assert "verify this first `Council:` line" in text
+    assert "visionary, pioneer, and architect" in text
+    assert "analyst, maintainer, or skeptic" in second
+    assert "repeat the second start/await once" in second
+
+
+def test_research_skills_treat_collisions_as_semantic_reanchors() -> None:
+    for skill in ("q-research", "q-brainstorm", "q-skystorm"):
+        text = " ".join(_skill(skill).split())
+        assert "QUERY-COLLISION" in text
+        assert "semantic failure" in text
+        assert "never mechanically shorten" in text
+        assert "filtered usable evidence" in text
+
+
+def test_codex_skystorm_reference_keeps_anchor_and_pivot_collision_contract() -> None:
+    text = " ".join(
+        (_SKILLS_DIR / "q-skystorm" / "references" / "codex-host.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    assert "grounded collision degrades with filtered usable evidence" in text
+    assert "only no usable anchor evidence remains `RETRY-REQUIRED`" in text
+    assert "Exploratory pivots retain deliberate `LOW-OVERLAP` candidates" in text
+    assert "never mechanically shorten it" in text
 
 
 def test_q_skystorm_skill_routes_required_action_table() -> None:

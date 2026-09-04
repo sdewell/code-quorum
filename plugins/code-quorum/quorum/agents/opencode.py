@@ -266,20 +266,35 @@ _OPENROUTER_PREFIX = "openrouter/"
 # ranking but complete slowly -- Parasail served deepseek-v4-pro at 394s total /
 # 324s to first content, vs 56s on Fireworks.
 #
-# V4 Flash is pinned to an explicit order instead. Measured 2026-08-27 (same
-# ~10K-token review prompt, 6 pinned requests per backend): how long the model
-# THINKS is a backend trait, and the throughput sort was landing every council
-# turn on SiliconFlow -- highest tokens/sec, but a median 5.6K reasoning tokens
-# per turn (max 10.6K) for a 52s median / 85s max turn. Novita: 0.7K reasoning
-# tokens, 8.7s median / 12s max. Parasail: 1.1K, 17s / 21s. In production the
-# tail was the whole problem: 3,200 council steps over 45 days showed steps with
-# >5K reasoning tokens at 82s average and 100% over 30s, and every idle-timeout
-# loss (OPENCODE_IDLE_TIMEOUT_S) was one of those turns. Reasoning-effort and
-# reasoning-budget request params are accepted but not enforced on SiliconFlow
-# (probed), so ordering backends is the lever. DeepInfra and DigitalOcean were
-# faster still but returned zero reasoning tokens (no thinking phase) -- left
-# out until review quality without thinking is checked. Fallbacks stay on so
-# an unavailable backend degrades to the next rather than failing the seat.
+# V4 Flash is pinned to an explicit order instead. This is an operational
+# preference for backends observed to complete quickly, NOT an established
+# causal fix -- the original rationale was audited on 2026-08-27 and did not
+# survive:
+#
+#   - The claim that the throughput sort put every turn on SiliconFlow is
+#     FALSE. OpenRouter's own activity ledger shows the seat was already
+#     71% Novita over the window and 73-100% Novita every day from 08-20;
+#     SiliconFlow was a 0-137 req/day minority. The pin can therefore only
+#     affect that minority -- it does not move the median turn.
+#   - The "SiliconFlow thinks ~20x longer" figure came from a truncated
+#     measurement (the probe capped max_tokens, SiliconFlow stopped at the
+#     cap, and a floor was compared against other backends' complete runs).
+#     It is withdrawn.
+#   - Within-day paired comparison, which holds workload roughly constant,
+#     finds Novita vs SiliconFlow indistinguishable on reasoning volume
+#     (5/10 days, sign p=1.00). The one effect that survives is Parasail
+#     reasoning ~40% less than Novita (18/20 days, p=0.0004).
+#
+# What does hold: reasoning-token volume correlates with step latency in the
+# seat's own history, and a controlled probe (2026-08-27, n=5/backend on one
+# fixed prompt) found Parasail reasoning ~12x less than Novita with complete
+# separation (median 3,173 vs 39,921, exact rank-sum p=0.008) and finishing
+# in 54-121s against 318-432s -- agreeing in direction with the ledger. That
+# probe is exploratory-tier and did not measure review QUALITY, so the order
+# below is left as-is rather than reordered on effort alone. The analysis,
+# experiment register, and probe data now live in the private `sdewell/seat-eval`
+# repository. Fallbacks stay on so an unavailable backend degrades to the next
+# rather than failing the seat.
 _PROVIDER_ORDER: dict[str, list[str]] = {
     "deepseek/deepseek-v4-flash": ["novita", "parasail", "siliconflow"],
 }

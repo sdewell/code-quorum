@@ -49,15 +49,19 @@ Anchor it in **two or more domain-specific terms** (the field plus the specific
 method or concept). A bare common token — `data`, `model`, `network`, `signal`
 — or a word that doubles as an author surname (`Sun`, `Li`) collides and returns
 confident-looking noise. The tool refuses the most generic lanes outright.
+A single named artifact or method is valid when it is the actual research
+target; never manufacture one by shortening a populated, colliding concept
+lane.
 Example for execution provenance:
 
 - `computational experiment provenance reproducibility artifacts`
 - `exploratory research raw data traceability`
 - `minimum information experimental reporting provenance`
 
-Mechanical shortening is only the first repair for one colliding lane. If that
-shortening also collides, use a **semantic re-anchor** with different domain
-terminology; repeatedly deleting words often makes the collision worse.
+Mechanical shortening is reserved for query-shape errors or an all-zero result
+set. A populated but off-topic lane is a semantic collision: use a **semantic
+re-anchor** with different domain terminology. Repeatedly deleting words often
+makes the collision worse.
 
 ## Step 2 — Call the tool
 
@@ -85,9 +89,14 @@ sink a good lane. Each row is one of:
 
 - `ON-TOPIC` — enough candidates share the lane vocabulary.
 - `THIN` — fewer than three candidates; too little evidence to grade relevance.
-- `QUERY-COLLISION` — enough candidates returned, but they do not match the
-  lane. Try one labelled mechanical shortening; if it still collides, use a
-  semantic re-anchor with different terminology.
+- `QUERY-COLLISION` — populated candidates do not match the lane, or arXiv
+  rejected a query that its internal mechanical repair could not recover. A
+  populated collision is a semantic failure; either case requires a semantic
+  re-anchor with different terminology, and never mechanically shorten it again.
+  Grounded mode excludes populated collision candidates from evidence lists
+  while their status row remains visible; exploratory mode retains them as
+  possible cross-domain evidence. A zero-candidate query rejection remains
+  actionable even when a peer source returned on-topic evidence.
 - `SOURCE-MISMATCH` — this source returned nothing while a peer source found
   on-topic work for the same lane; do not force that source to fit the domain.
 - `INFRASTRUCTURE` — the source failed after its bounded, delayed retry. A
@@ -100,17 +109,19 @@ The combined `Research status:` line summarizes those rows:
 - `OK` — the workflow is complete and no follow-up action is required. `THIN`
   and `SOURCE-MISMATCH` rows may remain as legitimate coverage information.
 - `DEGRADED` — one or more sources exhausted their bounded retry, but usable
-  peer evidence remains. Proceed, disclose each failed source, and do not repeat
-  the mechanical retry by hand.
+  peer evidence remains (including collisions alongside ON-TOPIC rows; when
+  paper sources were queried, usable evidence includes an ON-TOPIC paper row). Proceed
+  on filtered usable evidence, disclose each rejected or failed source/lane row,
+  and do not repeat the mechanical retry by hand.
 - `RETRY-REQUIRED` — required evidence is absent or a query lane whiffed or
   collided with unrelated work. `Research needs action: true` and the
   `### Required research actions` table name the exact action, source, and lane.
   Retry rows carry an executable query; a `RE-ANCHOR` row instead marks that
   different domain terms must be supplied. It
   **usually** carries one explicitly labelled mechanical shortening (`· try: "…"`) —
-  resubmit it once before concluding "no prior art". If that result still
-  reports `QUERY-COLLISION`, perform a semantic re-anchor instead of shortening
-  again. When the suggestion is **absent**, follow the required-actions table:
+  resubmit it once for syntactic/query-shaped failures before concluding "no prior art".
+  A `QUERY-COLLISION` never receives mechanical shortening: perform a semantic
+  re-anchor instead. When the suggestion is **absent**, follow the required-actions table:
   `RETRY-SAME` preserves an infrastructure-failed query, while `RE-ANCHOR`
   requires DIFFERENT domain-specific terms of your own. Shrugging the result
   off and answering
@@ -125,8 +136,9 @@ The combined `Research status:` line summarizes those rows:
 
 Mechanically-fixable failures (an arXiv 400, its 200-with-`Rate exceeded`
 rate refusal, a transient flake) are **already retried inside the tool** with a
-bounded delay where appropriate — a
-`↻` note marks a source that was repaired, not
+bounded delay where appropriate, before candidates are classified. The consumer
+instruction to never mechanically shorten applies after a returned
+`QUERY-COLLISION` — a `↻` note marks a source that was repaired, not
 hidden. A `SOURCE-MISMATCH` row is a real answer, not a whiff to rework.
 
 ## Step 4 — Present

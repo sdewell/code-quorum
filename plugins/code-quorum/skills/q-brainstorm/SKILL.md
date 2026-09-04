@@ -68,6 +68,8 @@ author surname (`Sun`, `Li`) collides and returns **confident-looking noise** (a
 finance, ❌ `data` / `alternative data` → ✓ `alternative data equity return prediction`. You don't
 need to hand-tune per backend — the tool shapes each source's query and strips arXiv's boolean
 operators for you.
+A single named artifact or method is valid when it is the actual target; never
+manufacture one by shortening a populated, colliding concept lane.
 
 Form 2–3 semantic query lanes and pass them as `query_lanes`: domain +
 construct, failure/validity, and review/guideline terminology. Pass
@@ -77,8 +79,8 @@ not manufacture lanes by repeatedly deleting words from one query.
 **The digest opens with a `Research status:` line — act on it before anything else, and quote it in
 Step 5.** It is the deterministic quality verdict:
 - `RETRY-REQUIRED` — the query whiffed or collided with unrelated work (off-topic hits, or every
-  paper source empty on a valid query). It **usually** carries a suggested shorter query (shown as
-  `· try: "…"`) — when present, you must call `q_research` again with it before concluding "no
+  paper source empty on a valid query). A query-shape or all-zero result may carry a suggested
+  shorter query (shown as `· try: "…"`) — when present, you must call `q_research` again before concluding "no
   prior art". `Research needs action: true` and the `### Required research actions` table name
   every exact action. `RETRY-SAME` preserves an infrastructure-failed query because changing terms
   cannot fix an outage; `RE-ANCHOR` requires DIFFERENT domain-specific terms of your own. The escape
@@ -86,15 +88,17 @@ Step 5.** It is the deterministic quality verdict:
   own knowledge — *"the research backend choked, I'll use what I know"* —
   is the **specific failure to avoid**.
 - `DEGRADED` — a source exhausted its bounded, delayed retry but usable peer evidence remains;
-  seed that evidence, disclose the failed source, and do not repeat the mechanical retry by hand.
+  this also covers collisions alongside usable on-topic rows, including an on-topic paper row
+  when paper sources were queried. Seed only the filtered usable evidence,
+  disclose every rejected source/lane row, and do not repeat the mechanical retry by hand.
 - `CONFIG` — a key/anonymous-access problem no retry fixes; proceed on the other sources and say so.
 - `OK` — the research workflow is complete and no follow-up action is required.
 
 Immediately inspect `### Source/lane status`. Its rows are `ON-TOPIC`, `THIN`,
 `QUERY-COLLISION`, `SOURCE-MISMATCH`, `INFRASTRUCTURE`, or `CONFIG`. A combined
-`OK` contains no required work. On `QUERY-COLLISION`, use the suggested mechanical
-shortening once; if that lane still collides, use a semantic re-anchor with
-different terminology. Follow the required-actions table on `RETRY-REQUIRED`,
+`OK` contains no required work. `QUERY-COLLISION` is semantic failure: never
+mechanically shorten it; use a semantic re-anchor with different terminology.
+Follow the required-actions table on `RETRY-REQUIRED`,
 disclose `INFRASTRUCTURE` under `DEGRADED`, fix or disclose `CONFIG`, and accept
 `SOURCE-MISMATCH` rather than forcing a source to fit the domain.
 
@@ -110,6 +114,10 @@ Call `mcp__plugin_code-quorum_quorum__q_brainstorm_start` (Claude Code) or
 - `topic`: the topic text
 - `cwd`: the absolute path of the project working directory
 - `host`: the current host selected above
+- `roles`: omit for a non-extended run so the global defaults apply. Under
+  `--extended`, the first call is the forward-but-structured pass: on Claude
+  Code pass `["visionary:codex", "pioneer:gemini", "architect:opencode"]`; on
+  Codex pass `["visionary:claude", "pioneer:gemini", "architect:opencode"]`.
 - `research`: the digest markdown from Step 2, passed **verbatim** — the raw
   `q_research` return value, unedited. Never your summary of it, and never
   your own Step-1 ideas (those stay behind the anti-bias gate). The server
@@ -146,6 +154,12 @@ voices **stance-first** — "the visionary (gemini)", never a bare seat name —
 matching the transcript's own labels: it shows the user the role assignment
 that actually ran (deliberation anonymizes peers by stance) and reminds them
 which stances they can reassign with `--role <stance>:<agent>`.
+
+Under `--extended`, verify this first `Council:` line reports the prescribed
+visionary, pioneer, and architect stances for every active seat (a seat reported
+as skipped is exempt). If an active seat ran under another stance, discard that
+round and repeat the start/await once with the exact round-1 `roles` array; do
+not silently present a default-stance run as the extended workflow.
 
 ## Step 5 — Combine and present
 
@@ -190,12 +204,19 @@ After Step 5, run one more round that pushes past everything on the table:
    `mcp__quorum_codex__q_brainstorm_start` (Codex) again with the same `topic`,
    `cwd`, and `host` as Step 3, plus `prior_ideas` set to that pool, `research` set to the same
    digest as Step 3 of the main flow (or the sharper one from the previous
-   item), and `verbose` set to the same boolean as Step 3. This tells the
-   agents not to repeat what's listed and to diverge past it, with the
-   evidence still in view.
+   item), and `verbose` set to the same boolean as Step 3. Pass the grounded
+   divergence roles for this second call: on Claude Code use
+   `["analyst:codex", "maintainer:gemini", "skeptic:opencode"]`; on Codex use
+   `["analyst:claude", "maintainer:gemini", "skeptic:opencode"]`. The second
+   call retains `prior_ideas` and never sets `grounding=true`; it is divergence,
+   not validation. This tells the agents not to repeat what's listed and to
+   diverge past it, with the evidence still in view.
 5. `q_await` the new `job_id`. Its result also begins with a `Council: …`
    liveness line — relay it in one line too (same as Step 4), so a quiet or
    failed member in this second round is not mistaken for a silent failure.
+   Verify every active seat reports the prescribed analyst, maintainer, or
+   skeptic stance (a skipped seat is exempt). If not, discard that round and
+   repeat the second start/await once with the exact round-2 `roles` array.
 6. Present round 1 + round 2 together, foregrounding genuinely new directions,
    novel syntheses, and concrete ways to research, test, or establish
    feasibility for the strongest threads.

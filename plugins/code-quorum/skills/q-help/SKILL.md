@@ -11,7 +11,7 @@ Print everything below the `---OUTPUT---` line verbatim as your response. Do not
 
 ## code-quorum — quick reference
 
-`code-quorum v0.0.70`
+`code-quorum v0.0.71`
 
 ### Modes
 
@@ -51,7 +51,7 @@ The other platform's seat is skeptic, Gemini is architect, and OpenCode is neutr
 
 Override per-agent with `roles=["security:gemini","maintainer:opencode"]`. Stances: `skeptic`, `architect`, `security`, `maintainer`, `analyst`, `neutral`, `visionary`, `pioneer`.
 
-These defaults apply to `q-plan`, `q-brainstorm`, `q-validate`, and `q-review`. `q-skystorm` keeps a host-specific workflow: Claude Code uses external Codex in both dream and analyst grounding; Codex uses external Claude, Gemini, and OpenCode dreamers plus a fresh native Codex supportive grounder. `--extended` (q-validate/q-review) rotates stances at round 3.
+These defaults apply to `q-plan`, non-extended `q-brainstorm`, and the initial rounds of `q-validate` and `q-review`. Extended `q-brainstorm` uses visionary/pioneer/architect first, then analyst/maintainer/skeptic; it keeps `prior_ideas` without enabling grounding. `q-skystorm` keeps a host-specific workflow: Claude Code uses external Codex in both dream and analyst grounding; Codex uses external Claude, Gemini, and OpenCode dreamers plus a fresh native Codex supportive grounder. `--extended` (q-validate/q-review) rotates stances at round 3.
 
 ### More
 

@@ -359,7 +359,7 @@ def select_agents(
                     f"{profile.name!r}; it cannot also run as a subprocess seat"
                 )
             selected.append(_build_seat(n, gemini_model, profile))
-    _assign_roles(selected, roles, profile)
+    _assign_roles(selected, roles, profile, set(skipped) if not names else set())
     return SeatSelection(selected, skipped)
 
 
@@ -378,7 +378,10 @@ def no_live_seats_message(skipped: list[str]) -> str:
 
 
 def _assign_roles(
-    agents: list[Agent], roles: list[str] | None, profile: HostProfile
+    agents: list[Agent],
+    roles: list[str] | None,
+    profile: HostProfile,
+    ignored_targets: set[str] | None = None,
 ) -> None:
     """Resolve `--role stance:agent` assignments onto agent instances.
     Agents not named fall back to their class `default_role`."""
@@ -387,6 +390,8 @@ def _assign_roles(
     for raw in roles or []:
         stance, agent_name = parse_role_arg(raw)
         if agent_name not in by_name:
+            if agent_name in (ignored_targets or set()):
+                continue
             raise ValueError(
                 f"--role targets agent '{agent_name}', which is not selected. "
                 f"selected: {', '.join(by_name) or '(none)'}"
