@@ -86,6 +86,7 @@ def test_review_prompt_has_format_slots_and_labels() -> None:
     assert "SEVERITY" in rendered
     assert "FINDING" in rendered
     assert "RECOMMENDATION" in rendered
+    assert "REPRO:" in rendered
     # severity vocabulary matches the codex review schema
     for sev in ("critical", "high", "medium", "low"):
         assert sev in rendered

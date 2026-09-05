@@ -4,6 +4,13 @@
 > every council agent what is in bounds. Out-of-scope / accepted-risk items are noted but
 > never treated as findings to converge on. Delete these guidance comments before use.
 
+## Threat model
+<!-- Copy the repo's threat model verbatim from its CLAUDE.md (trusted / semi-trusted /
+     out-of-scope). Seats treat hardening against an out-of-scope threat as
+     [OUT-OF-SCOPE], not as a finding. A repo with no threat model gets one written
+     into CLAUDE.md before the review. -->
+-
+
 ## In scope
 <!-- What this review SHOULD focus on: the changed surface, specific files/dirs, the
      behaviors or risk classes that matter for this change. Be concrete. -->

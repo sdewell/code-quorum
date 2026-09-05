@@ -266,6 +266,24 @@ def test_q_review_skill_uses_out_of_scope_tag_literal() -> None:
     assert OUT_OF_SCOPE_TAG in _skill("q-review")
 
 
+def test_q_review_skill_and_scope_template_carry_the_repro_gate() -> None:
+    """A critical/high finding without a reproducible recipe must be
+    downgraded, and the repo's threat model must reach seats via the scope
+    template. The SKILL prose and the template file must both carry these,
+    matching REVIEW_PROMPT's REPRO label in quorum/orchestration.py."""
+    skill = _skill("q-review")
+    assert "REPRO" in skill
+    # The host records whether it ran the recipe; a seat's claim is not evidence.
+    assert "`confirmed`" in skill
+    # Scope is adjudicated before repro: a reproducible out-of-scope hardening
+    # finding stays struck.
+    assert "SCOPE first, then REPRO" in skill
+    template = (
+        _SKILLS_DIR / "q-review" / "references" / "scope-template.md"
+    ).read_text(encoding="utf-8")
+    assert "## Threat model" in template
+
+
 def test_q_skystorm_skill_uses_brainstorm_engine_with_grounding() -> None:
     """Skystorm has no own start tool — it drives the brainstorm engine. It
     must reference q_brainstorm_start and use the grounding flag for Stage 2."""

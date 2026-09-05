@@ -78,7 +78,7 @@ Expected wall-clock to completion: 1–8min for the default 2-round flow; 4–15
 
 Before retrieving any agent output, read the change yourself and write your **own** independent code review of the diff (for `all`, read the relevant files at `cwd`). Produce a written review with:
 
-- Concrete bugs, regressions, and security holes — `FILE: path:line`, severity (`critical` / `high` / `medium` / `low`), what is wrong and why, and the fix.
+- Concrete bugs, regressions, and security holes — `FILE: path:line`, severity (`critical` / `high` / `medium` / `low`), what is wrong and why, and the fix. Each `critical`/`high` carries a REPRO: a command or test that shows it, with expected vs observed.
 - Missing edge cases or risks.
 - Structural / blast-radius concerns.
 
@@ -105,12 +105,15 @@ Emit, in this order:
 1. **A verdict line on top** — exactly one of `approve` / `approve-with-fixes` / `request-changes`. This answers "is this branch ready to merge?"
 2. **A findings table** with these columns:
 
-   | FILE:line | SEVERITY | FINDING | flagged-by | SCOPE | RECOMMENDATION |
-   |---|---|---|---|---|---|
+   | FILE:line | SEVERITY | FINDING | flagged-by | SCOPE | REPRO | RECOMMENDATION |
+   |---|---|---|---|---|---|---|
 
-   - **SEVERITY** is one of `critical` / `high` / `medium` / `low`.
+   Apply **SCOPE first, then REPRO**. A reproduction proves the code path exists, not that the threat is in scope — hardening against an out-of-scope threat reproduces just as well as a real bug, so the scope strike happens regardless of REPRO.
+
+   - **SCOPE** is `in` or `out`. If a scope doc declares a finding out of bounds (out-of-scope, a known edge case, an accepted risk, or a threat the `## Threat model` section excludes — agents tag these `[OUT-OF-SCOPE]` on the FINDING line), **strike the row and exclude it from the converged set**: render it struck through and marked `[OUT-OF-SCOPE]`, do not let it influence the verdict. You may override a strike only by quoting, in the FINDING column, the threat-model line the finding contradicts; without that quote the strike stands.
+   - **REPRO** is `confirmed` (you ran the recipe on this machine and observed the failure), `unconfirmed` (a recipe was given but you did not or could not run it), or `none`. A `critical` or `high` finding whose REPRO is not `confirmed` is downgraded to `low` before it can influence the verdict. A seat's recipe is a claim; only your run is evidence.
+   - **SEVERITY** is one of `critical` / `high` / `medium` / `low`, after the REPRO downgrade above.
    - **flagged-by** is the convergence count, `N of M` agents (count your own review as a separate signal, not one of the M agents).
-   - **SCOPE** is `in` or `out`. If a scope doc declares a finding out of bounds (out-of-scope, a known edge case, or an accepted risk — agents tag these `[OUT-OF-SCOPE]` on the FINDING line), **strike the row and exclude it from the converged set**: render it struck through and marked `[OUT-OF-SCOPE]`, do not let it influence the verdict. You make the final keep/exclude call — a mis-scoped-but-real critical bug is still worth surfacing, just outside the converged table.
 
 If agreement is low (most findings flagged by only 1 of M, or agents disagree on whether something is a finding at all), **recommend an `--extended` re-run** so the council spends more rounds converging.
 
