@@ -1,10 +1,8 @@
 name: CI
 
-# pull_request only: squash-merge lands the exact tree the PR run tested, so a
-# post-merge push run would be a duplicate.
+# Trigger is workflow_dispatch only: CI runs on main once a day from ci-dispatch on S's Mac (ledger ci-daily-dispatch-go, 2026-09-10).
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
