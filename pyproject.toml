@@ -1,6 +1,6 @@
 [project]
 name = "code-quorum"
-version = "0.0.72"
+version = "0.0.73"
 description = "Multi-agent council for Claude Code and Codex"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -41,6 +41,16 @@ dev = [
 # it here makes the hook and CI use the same width.
 line-length = 88
 exclude = ["plugins/"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# UP047 (PEP 695 generic syntax) deferred: quorum/research.py's _search_union
+# and _escalate_union share a module-level `_T = TypeVar("_T")` with no other
+# generic functions in the file, so rewriting just these two to `def f[T]`
+# syntax would split the file between two generic styles instead of adopting
+# one. Ruff also only offers this as an unsafe fix. Revisit when the repo
+# adopts PEP 695 generics more broadly.
+ignore = ["UP047"]
 
 [tool.ty.environment]
 python-version = "3.13"

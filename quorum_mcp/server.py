@@ -436,10 +436,10 @@ async def q_research(
     Each lane must be short and distinctive -- short is not the same as generic.
     Anchor ordinary concept lanes in 2+ domain-specific terms. A single named
     artifact or method is valid when it is the actual target. Generic or
-    off-topic lanes should re-anchor and call q_research again. QUERY-COLLISION is semantic failure:
-    never mechanically shorten it. Collisions alongside usable ON-TOPIC evidence
-    are DEGRADED and proceed on filtered usable evidence; when paper sources were
-    queried, usable evidence requires an ON-TOPIC paper row. All-collision
+    off-topic lanes should re-anchor and call q_research again. QUERY-COLLISION is
+    semantic failure: never mechanically shorten it. Collisions alongside usable
+    ON-TOPIC evidence are DEGRADED and proceed on filtered usable evidence; when paper
+    sources were queried, usable evidence requires an ON-TOPIC paper row. All-collision
     results are RETRY-REQUIRED and need a semantic re-anchor. For same-domain
     work, returned titles should belong to your domain. For a deliberate
     cross-domain probe, judge structural kinship instead; an off-domain hit can

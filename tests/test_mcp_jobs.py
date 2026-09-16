@@ -485,7 +485,7 @@ async def test_brainstorm_grounding_keeps_opencode_on_flash(
     await server.q_await(out["job_id"])
     seat = captured["agents"][0]
     assert isinstance(seat, OpenCodeAgent)
-    assert seat.model == "openrouter/deepseek/deepseek-v4-flash"
+    assert seat.model == "openrouter/deepseek/deepseek-v4.1-flash"
 
 
 @pytest.mark.asyncio

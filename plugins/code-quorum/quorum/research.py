@@ -1619,7 +1619,7 @@ _ON_TOPIC_MIN = 0.5  # below this fraction of on-topic hits, a query is suspect
 _MIN_SCORING_HITS = 3  # too few hits to judge overlap; don't flag on 1-2 papers
 
 
-def _scoreable_texts(papers: "Iterable[Paper]", query: str) -> list[str]:
+def _scoreable_texts(papers: Iterable[Paper], query: str) -> list[str]:
     """The texts `compute_status` may judge a query by. A paper with an abstract
     contributes title+abstract and is scored either way. A paper whose source
     returned no abstract (OpenAlex omits `abstract_inverted_index` on some
@@ -1932,7 +1932,7 @@ def _rework(source: str, query: str) -> str:
 
 
 def compute_status(
-    digest: "ResearchDigest", *, mode: str | None = None
+    digest: ResearchDigest, *, mode: str | None = None
 ) -> ResearchStatus:
     """Derive the quality verdict from a completed digest. `mode` is 'grounded'
     (brainstorm: a low on-topic score is a defect -> RETRY-REQUIRED) or

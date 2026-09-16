@@ -373,9 +373,10 @@ def test_select_agents_rejects_unknown_stance() -> None:
 # --- opencode (DeepSeek) seat model policy ---
 # A blinded 3-judge eval found V4 Flash statistically indistinguishable from V4
 # Pro on long-form ideation while ~1.75x faster and cheaper, so the opencode
-# seat always runs V4 Flash. Pro is reachable only via the
+# seat always runs the Flash tier (current pin: FLASH_MODEL in
+# quorum/agents/opencode.py). Pro is reachable only via the
 # CODE_QUORUM_OPENCODE_MODEL override (ad-hoc A/B).
-_FLASH = "openrouter/deepseek/deepseek-v4-flash"
+_FLASH = "openrouter/deepseek/deepseek-v4.1-flash"
 
 
 def _opencode_model() -> str:

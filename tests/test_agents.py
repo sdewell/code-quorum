@@ -461,9 +461,9 @@ def test_opencode_build_command_shape() -> None:
     assert cmd[-1] == "hello world"
 
 
-def test_opencode_build_command_default_model_is_v4_flash() -> None:
+def test_opencode_build_command_default_model_is_v41_flash() -> None:
     cmd = OpenCodeAgent().build_command(prompt="x", cwd="/repo")
-    assert cmd[cmd.index("-m") + 1] == "openrouter/deepseek/deepseek-v4-flash"
+    assert cmd[cmd.index("-m") + 1] == "openrouter/deepseek/deepseek-v4.1-flash"
 
 
 def test_opencode_build_command_with_model_override() -> None:
@@ -522,19 +522,41 @@ def test_build_opencode_config_openrouter_pins_throughput() -> None:
     assert model_cfg["options"]["provider"] == {"sort": "throughput"}
 
 
-def test_build_opencode_config_v4_flash_pins_provider_order() -> None:
-    # Throughput sort lands V4 Flash on SiliconFlow, where the model thinks
-    # ~5.6K reasoning tokens per turn (52s median, 85s max); Novita/Parasail
-    # serve the same model at ~0.7-1.1K reasoning tokens (9-17s). An explicit
-    # order keeps the seat on the fast backends; fallbacks stay on so an
-    # unavailable backend degrades to the next instead of failing the seat.
-    cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4-flash")
+def test_build_opencode_config_v41_flash_pins_provider_order() -> None:
+    # Reproducible flavor: both backends serve V4.1 Flash at fp8 and pass the
+    # account's zero-data-retention policy (DeepSeek's own endpoint does not).
+    # Novita first -- in the 2026-09-15 probe (docs/adr/0001) Parasail was
+    # rate-limited upstream on half its requests and 3-8x slower. Fallbacks
+    # stay on so an unavailable backend degrades to the next, same quant.
+    cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4.1-flash")
     assert cfg is not None
-    model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4-flash"]
+    model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]
     assert model_cfg["options"]["provider"] == {
-        "order": ["novita", "parasail", "siliconflow"],
+        "order": ["novita", "parasail"],
         "allow_fallbacks": True,
     }
+
+
+def test_build_opencode_config_v41_flash_pins_medium_reasoning_effort() -> None:
+    # opencode forwards `options.reasoning` verbatim as OpenRouter's
+    # `reasoning` request object (captured on the wire 2026-09-15). Medium is
+    # the only effort level that held steady across providers in the probe
+    # (5.2-6.7K reasoning tokens, n=4); low was erratic (1.1K with an empty
+    # answer, then 23.7K), high and default were indistinguishable and one
+    # default run exceeded opencode's fixed 32K max_tokens.
+    cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4.1-flash")
+    assert cfg is not None
+    model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]
+    assert model_cfg["options"]["reasoning"] == {"effort": "medium"}
+
+
+def test_build_opencode_config_unmeasured_model_sends_no_reasoning_effort() -> None:
+    # The effort knob is per-model evidence, not a default: on V4 Flash the
+    # same parameter was accepted and ignored (seat-eval 2026-08-27 probe).
+    cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4-pro")
+    assert cfg is not None
+    model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4-pro"]
+    assert "reasoning" not in model_cfg["options"]
 
 
 def test_build_opencode_config_arms_opencodes_own_stream_watchdog() -> None:
@@ -2189,3 +2211,166 @@ def test_opencode_version_caches_across_calls(monkeypatch: pytest.MonkeyPatch) -
     assert opencode_mod._opencode_version() == "0.42.0"
     assert opencode_mod._opencode_version() == "0.42.0"
     assert len(calls) == 1
+
+
+# --- served-backend relay (records which OpenRouter backend served a turn) ---
+# The provider pin (_PROVIDER_ORDER) is only auditable if the seat records
+# who actually served. opencode drops OpenRouter's `provider` field, so run()
+# points opencode at a loopback relay (quorum.agents.openrouter_relay) via
+# the generated config's baseURL. The relay is best-effort: if it cannot
+# bind, the seat runs direct to OpenRouter exactly as before.
+
+
+def test_subprocess_env_points_openrouter_at_relay_per_process(tmp_path: Path) -> None:
+    # The relay URL rides in OPENCODE_CONFIG_CONTENT (per process), never in
+    # the shared sandbox opencode.json: two overlapping seat runs must each
+    # keep their own relay. opencode deep-merges it over the file config
+    # (verified on the wire against 1.18.25).
+    env = _build_subprocess_env(
+        tmp_path, "k", base={}, relay_base_url="http://127.0.0.1:43111/api/v1"
+    )
+    content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert content == {
+        "provider": {
+            "openrouter": {"options": {"baseURL": "http://127.0.0.1:43111/api/v1"}}
+        }
+    }
+    cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4.1-flash")
+    assert cfg is not None
+    assert "baseURL" not in cfg["provider"]["openrouter"]["options"]
+
+
+def test_subprocess_env_without_relay_sends_no_override(tmp_path: Path) -> None:
+    # No relay -> no OPENCODE_CONFIG_CONTENT at all, so opencode uses its
+    # built-in OpenRouter endpoint (the pre-relay behaviour, byte for byte).
+    env = _build_subprocess_env(tmp_path, "k", base={})
+    assert "OPENCODE_CONFIG_CONTENT" not in env
+
+
+class _FakeRelay:
+    """Stand-in for OpenRouterRelay: records lifecycle calls, never binds."""
+
+    instances: list["_FakeRelay"] = []
+    start_error: BaseException | None = None
+
+    def __init__(self, **_kw: object) -> None:
+        self.base_url: str | None = None
+        self.started = 0
+        self.stopped = 0
+        self.turns: list[object] = []
+        _FakeRelay.instances.append(self)
+
+    async def start(self) -> str:
+        if _FakeRelay.start_error is not None:
+            raise _FakeRelay.start_error
+        self.started += 1
+        self.base_url = "http://127.0.0.1:43111/api/v1"
+        return self.base_url
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+    def summary(self) -> dict[str, int]:
+        return {}
+
+
+def _patch_relay_seams(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> list[dict[str, object]]:
+    """Patch the run() seams like _patch_opencode_run_seams, but capture the
+    kwargs _build_subprocess_env receives so a test can see the relay URL."""
+    env_calls: list[dict[str, object]] = []
+
+    def _record_env(*_a: object, **kw: object) -> dict[str, str]:
+        env_calls.append(dict(kw))
+        return {}
+
+    async def _ok(
+        proc: object, *, pgid: int, idle_timeout: float
+    ) -> tuple[bytes, bytes, bool]:
+        return (b'{"type":"text","part":{"text":"ok"}}\n', b"", False)
+
+    _patch_opencode_run_seams(monkeypatch, tmp_path, _ok)
+    monkeypatch.setattr(opencode_mod, "_build_subprocess_env", _record_env)
+    _FakeRelay.instances = []
+    _FakeRelay.start_error = None
+    monkeypatch.setattr(opencode_mod, "OpenRouterRelay", _FakeRelay)
+    monkeypatch.delenv("CODE_QUORUM_OPENCODE_RELAY", raising=False)
+    return env_calls
+
+
+@pytest.mark.asyncio
+async def test_opencode_run_routes_through_relay_and_stops_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_calls = _patch_relay_seams(monkeypatch, tmp_path)
+
+    result = await OpenCodeAgent().run(prompt="x", cwd="/tmp")
+
+    assert result.returncode == 0
+    assert len(_FakeRelay.instances) == 1, "one relay per seat run"
+    relay = _FakeRelay.instances[0]
+    assert relay.started == 1
+    assert relay.stopped == 1, "the relay must be stopped after the run"
+    # The subprocess env pointed opencode at the relay, not at OpenRouter.
+    assert env_calls[0]["relay_base_url"] == "http://127.0.0.1:43111/api/v1"
+
+
+@pytest.mark.asyncio
+async def test_opencode_run_falls_back_to_direct_when_relay_cannot_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # S's constraint: the relay must never cost a call. A bind failure is
+    # logged and the seat runs direct (no baseURL override).
+    env_calls = _patch_relay_seams(monkeypatch, tmp_path)
+    _FakeRelay.start_error = OSError(98, "address in use")
+
+    with caplog.at_level(logging.WARNING, logger="quorum.agents.opencode"):
+        result = await OpenCodeAgent().run(prompt="x", cwd="/tmp")
+
+    assert result.returncode == 0
+    assert env_calls[0]["relay_base_url"] is None
+    assert any("relay" in r.getMessage().lower() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_opencode_run_relay_disabled_by_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_calls = _patch_relay_seams(monkeypatch, tmp_path)
+    monkeypatch.setenv("CODE_QUORUM_OPENCODE_RELAY", "0")
+
+    result = await OpenCodeAgent().run(prompt="x", cwd="/tmp")
+
+    assert result.returncode == 0
+    assert _FakeRelay.instances == [], "CODE_QUORUM_OPENCODE_RELAY=0 skips the relay"
+    assert env_calls[0]["relay_base_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_opencode_run_stops_relay_even_when_attempt_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A crash inside the attempt must not leak the loopback listener.
+    _patch_relay_seams(monkeypatch, tmp_path)
+
+    async def _boom(*_a: object, **_kw: object) -> AgentResult:
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(OpenCodeAgent, "_attempt", _boom)
+
+    with pytest.raises(RuntimeError):
+        await OpenCodeAgent().run(prompt="x", cwd="/tmp")
+
+    assert _FakeRelay.instances[0].stopped == 1
+
+
+def test_unpinned_backends_flags_servers_outside_the_pin() -> None:
+    # Ledger names are OpenRouter display names ("Novita"); the pin holds
+    # slugs ("novita"). Comparison is case-insensitive; "(none)" is not a
+    # backend. A model with no pin has nothing to flag.
+    unpinned = opencode_mod._unpinned_backends
+    model = "deepseek/deepseek-v4.1-flash"
+    assert unpinned(model, {"Novita": 3, "Parasail": 1, "(none)": 1}) == []
+    assert unpinned(model, {"Novita": 3, "DeepInfra": 2}) == ["DeepInfra"]
+    assert unpinned("deepseek/deepseek-v4-pro", {"DeepInfra": 2}) == []

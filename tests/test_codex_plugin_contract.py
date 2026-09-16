@@ -241,7 +241,13 @@ def test_public_invocation_docs_are_host_aware() -> None:
 def test_public_readme_is_consolidated_and_links_public_guides() -> None:
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert len(readme.split()) < 2_500
+    # The cap guards public README prose. The framework banner (one line, fixed
+    # wording, mandated in every repo by ~/.claude/rules/repo-docs.md) is not
+    # prose and does not spend the budget.
+    prose = "\n".join(
+        line for line in readme.splitlines() if not line.startswith("> **Purpose:**")
+    )
+    assert len(prose.split()) < 2_500
     assert "[Security and data boundaries](SECURITY.md)" in readme
     assert "[ARCHITECTURE.md](ARCHITECTURE.md)" in readme
     for target in re.findall(r"\]\(([^)#]+\.md)(?:#[^)]+)?\)", readme):

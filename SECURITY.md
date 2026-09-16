@@ -90,8 +90,11 @@ OpenCode configuration. Each run uses an isolated HOME at
 `~/.cache/code-quorum/opencode-sandbox`, and Code Quorum rebuilds this generated
 configuration before each run.
 
-The shipped model is `openrouter/deepseek/deepseek-v4-flash`. Its generated
-configuration sets the OpenRouter `chunkTimeout` to `90000` milliseconds and
+The shipped model is `openrouter/deepseek/deepseek-v4.1-flash`, routed to the
+Novita and Parasail backends. DeepSeek's own endpoint is not in that order:
+it fails the OpenRouter account's zero-data-retention and no-training policy,
+and both listed backends pass it. Its generated configuration sets the
+OpenRouter `chunkTimeout` to `90000` milliseconds, `reasoning.effort` to `medium`, and
 sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `OPENCODE_PURE=1`. The generated
 council agent permits only `Read`, `glob`, and `list`; it denies shell, write,
 and edit tools. Reads of `.env` and `.env.*` are denied while `.env.example`
@@ -107,6 +110,20 @@ extra failure captures.
 The SessionStart database pruner activates above 500 MB and removes oldest
 council sessions toward 400 MB while preserving the newest 10; non-council
 OpenCode sessions are not deleted.
+
+To record which OpenRouter backend served each request, the seat routes
+OpenCode through a loopback relay (`quorum/agents/openrouter_relay.py`)
+bound to `127.0.0.1` on an ephemeral port for the life of one run. The
+relay sees the full request, including the `Authorization` header and the
+reviewed material, and forwards it unchanged to `https://openrouter.ai`. It
+does not log or store request or response bodies or headers. It appends one
+JSON line per request to `~/.cache/code-quorum/opencode-served.jsonl`
+(directory `0700`, file `0600`): backend name, generation id, model, token
+counts, cost, HTTP status, finish reason, and timings. The listener accepts
+connections from any local process during the run; such a process runs as
+the same user and already holds `OPENROUTER_API_KEY`, so the relay does not
+widen that boundary. `CODE_QUORUM_OPENCODE_RELAY=0` disables the relay and
+the ledger.
 
 ## Material available outside the host
 

@@ -22,6 +22,7 @@ from .base import (
     communicate_lines_or_kill,
     has_usage_limit_diagnostic,
 )
+from .openrouter_relay import OpenRouterRelay
 
 logger = logging.getLogger(__name__)
 
@@ -131,12 +132,18 @@ only whitespace. Once you have read what you need, stop reading and write the
 response.
 """
 
-# V4 Flash -- the throughput-tier DeepSeek model (same family/provider as the
-# heavier V4 Pro), markedly cheaper and ~1.75x faster. A blinded 3-judge eval
-# found it statistically indistinguishable from V4 Pro on long-form ideation,
-# and its grounding edge did not survive multiplicity correction -- so the
-# opencode seat runs Flash on EVERY phase (see make_opencode_agent below).
-FLASH_MODEL = "openrouter/deepseek/deepseek-v4-flash"
+# The Flash tier of DeepSeek's V4 family. A blinded 3-judge eval found V4
+# Flash statistically indistinguishable from the heavier V4 Pro on long-form
+# ideation while markedly cheaper and ~1.75x faster, so the opencode seat runs
+# Flash on EVERY phase (see make_opencode_agent below).
+#
+# Pinned to V4.1 Flash since 2026-09-15 (docs/adr/0001): DeepSeek retired the
+# 0423 V4 Flash build upstream on 2026-09-10, and V4.1 Flash is the largest
+# step on the agentic-coding benchmarks closest to the seat's work (vendor
+# table: Terminal-Bench 2.1 82.7 -> 90.6, DeepSWE 54.4 -> 74.2). This id is a
+# fixed open-weights checkpoint on OpenRouter; never use the `~deepseek/...-latest`
+# alias ids, which move without notice.
+FLASH_MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
 
 # The opencode seat's default model. Flash everywhere (S, 2026-07-05): q-review
 # was the bulk of the seat's OpenRouter spend and the Pro grounding edge above
@@ -239,6 +246,13 @@ OPENCODE_DEBUG_MAX_FILES = 20
 # is recorded in normal use; set CODE_QUORUM_OPENCODE_DEBUG=0 to disable.
 _DEBUG_ENV_VAR = "CODE_QUORUM_OPENCODE_DEBUG"
 
+# The served-backend relay (openrouter_relay.py) is on by default: it is the
+# only way to see which OpenRouter backend served a turn, and the provider
+# pin above is unauditable without it. Set CODE_QUORUM_OPENCODE_RELAY=0 to
+# run opencode direct to OpenRouter (the pre-relay path). A relay that
+# cannot bind its loopback port also falls back to direct, with a warning.
+_RELAY_ENV_VAR = "CODE_QUORUM_OPENCODE_RELAY"
+
 # npm's content-addressed cache (.npm/_cacache) under the sandbox HOME never
 # garbage-collects on its own: every opencode version bump re-resolves deps and
 # orphans the prior version's tarballs, so the cache grows monotonically (~2 GB
@@ -266,10 +280,15 @@ _OPENROUTER_PREFIX = "openrouter/"
 # ranking but complete slowly -- Parasail served deepseek-v4-pro at 394s total /
 # 324s to first content, vs 56s on Fireworks.
 #
-# V4 Flash is pinned to an explicit order instead. This is an operational
-# preference for backends observed to complete quickly, NOT an established
-# causal fix -- the original rationale was audited on 2026-08-27 and did not
-# survive:
+# V4.1 Flash is pinned to an explicit order instead, for a reproducible
+# flavor: Novita and Parasail both serve it at fp8 and both pass the
+# account's zero-data-retention policy, which excludes DeepSeek's own
+# endpoint. Novita first: in the 2026-09-15 probe (docs/adr/0001) Parasail
+# was rate-limited upstream on half its requests and finished 3-8x slower.
+#
+# The predecessor V4 Flash order was an operational preference for backends
+# observed to complete quickly, NOT an established causal fix -- its original
+# rationale was audited on 2026-08-27 and did not survive:
 #
 #   - The claim that the throughput sort put every turn on SiliconFlow is
 #     FALSE. OpenRouter's own activity ledger shows the seat was already
@@ -290,13 +309,27 @@ _OPENROUTER_PREFIX = "openrouter/"
 # fixed prompt) found Parasail reasoning ~12x less than Novita with complete
 # separation (median 3,173 vs 39,921, exact rank-sum p=0.008) and finishing
 # in 54-121s against 318-432s -- agreeing in direction with the ledger. That
-# probe is exploratory-tier and did not measure review QUALITY, so the order
-# below is left as-is rather than reordered on effort alone. The analysis,
-# experiment register, and probe data now live in the private `sdewell/seat-eval`
+# probe is exploratory-tier and did not measure review QUALITY. The analysis,
+# experiment register, and probe data live in the private `sdewell/seat-eval`
 # repository. Fallbacks stay on so an unavailable backend degrades to the next
 # rather than failing the seat.
 _PROVIDER_ORDER: dict[str, list[str]] = {
-    "deepseek/deepseek-v4-flash": ["novita", "parasail", "siliconflow"],
+    "deepseek/deepseek-v4.1-flash": ["novita", "parasail"],
+}
+
+# Per-model OpenRouter `reasoning.effort`. Only for models where the knob was
+# measured to do something: on V4 Flash `effort=low` was accepted and ignored
+# (seat-eval 2026-08-27, ~34K reasoning tokens either way). On V4.1 Flash
+# (2026-09-15 probe, docs/adr/0001) medium was the one level that held steady
+# across providers -- 5.2-6.7K reasoning tokens over four runs on two
+# backends, answers complete in 35-42s on Novita -- while low was erratic
+# (1.1K with an empty answer, then 23.7K) and high was indistinguishable from
+# the default (10-32K). Medium also keeps completions near 8K tokens, under
+# opencode's fixed 32,000 max_tokens (captured on the wire; the per-model
+# `limit.output` setting does not raise it), which one default-effort run
+# exceeded at 34.8K -- a truncated answer the seat would report as empty.
+_REASONING_EFFORT: dict[str, str] = {
+    "deepseek/deepseek-v4.1-flash": "medium",
 }
 
 
@@ -307,31 +340,48 @@ def _provider_routing(model_id: str) -> dict:
     return {"order": list(order), "allow_fallbacks": True}
 
 
+def _model_options(model_id: str) -> dict:
+    """The generated `options` block for one OpenRouter model id. opencode
+    forwards each key verbatim into the request body (`provider`, `reasoning`
+    both captured on the wire 2026-09-15)."""
+    options: dict = {"provider": _provider_routing(model_id)}
+    effort = _REASONING_EFFORT.get(model_id)
+    if effort is not None:
+        options["reasoning"] = {"effort": effort}
+    return options
+
+
 def _build_opencode_config(model: str) -> dict | None:
-    """Build the sandbox opencode.json for an OpenRouter model. Two pins:
+    """Build the sandbox opencode.json for an OpenRouter model. Three pins:
 
     1. Provider routing (_provider_routing): an explicit backend order for
        models we have measured, throughput-sorted routing otherwise. opencode
        forwards `options.provider` verbatim as OpenRouter's provider-routing
        object (verified end-to-end). The model id is keyed without the
        "openrouter/" prefix (opencode's per-provider id).
-    2. `small_model` (DEFAULT_SMALL_MODEL) so opencode's auxiliary title/
+    2. Reasoning effort (_REASONING_EFFORT) for models where the knob was
+       measured to work; omitted otherwise.
+    3. `small_model` (DEFAULT_SMALL_MODEL) so opencode's auxiliary title/
        summarize/classify calls bill a known cheap model instead of the Haiku
        its regex auto-selects in this OpenRouter-only sandbox (see the constant).
+
+    The served-backend relay's URL is deliberately NOT here: this file is
+    shared by every seat run on the machine, and a per-run port in it would
+    let two overlapping runs point opencode at each other's relay. It goes
+    in the subprocess environment instead (_relay_config_content).
 
     Returns None for non-OpenRouter models -- there is no routing to pin."""
     if not model.startswith(_OPENROUTER_PREFIX):
         return None
     model_id = model[len(_OPENROUTER_PREFIX) :]
+    options: dict = {"chunkTimeout": OPENROUTER_CHUNK_TIMEOUT_MS}
     return {
         "$schema": "https://opencode.ai/config.json",
         "small_model": DEFAULT_SMALL_MODEL,
         "provider": {
             "openrouter": {
-                "options": {"chunkTimeout": OPENROUTER_CHUNK_TIMEOUT_MS},
-                "models": {
-                    model_id: {"options": {"provider": _provider_routing(model_id)}}
-                },
+                "options": options,
+                "models": {model_id: {"options": _model_options(model_id)}},
             }
         },
     }
@@ -444,14 +494,31 @@ async def _prune_npm_cache(
     return True
 
 
+def _relay_config_content(base_url: str) -> str:
+    """The OPENCODE_CONFIG_CONTENT value that points opencode's openrouter
+    provider at the served-backend relay. opencode deep-merges this JSON over
+    the sandbox opencode.json (verified on the wire, 1.18.25: the file's
+    chunkTimeout and per-model provider/reasoning pins survive, and every
+    request lands at the override URL), and it is per process, so two seat
+    runs overlapping on this machine each keep their own relay."""
+    return json.dumps({"provider": {"openrouter": {"options": {"baseURL": base_url}}}})
+
+
 def _build_subprocess_env(
-    sandbox_home: Path, api_key: str, base: dict[str, str] | None = None
+    sandbox_home: Path,
+    api_key: str,
+    base: dict[str, str] | None = None,
+    relay_base_url: str | None = None,
 ) -> dict[str, str]:
-    """Construct the minimal opencode environment and pin its private HOME."""
+    """Construct the minimal opencode environment and pin its private HOME.
+    `relay_base_url`, when set, routes the openrouter provider through the
+    served-backend relay (see _relay_config_content)."""
     env = allowlisted_seat_subprocess_env(base=base)
     env["HOME"] = str(sandbox_home)
     env["OPENROUTER_API_KEY"] = api_key
     env.update(_PROJECT_DISABLE_ENV)
+    if relay_base_url is not None:
+        env["OPENCODE_CONFIG_CONTENT"] = _relay_config_content(relay_base_url)
     return env
 
 
@@ -585,6 +652,27 @@ def _debug_enabled(environ: dict[str, str] | None = None) -> bool:
     env = os.environ if environ is None else environ
     val = env.get(_DEBUG_ENV_VAR, "1").strip().lower()
     return val not in ("0", "false", "no", "off", "")
+
+
+def _relay_enabled(environ: dict[str, str] | None = None) -> bool:
+    """Whether to route opencode through the served-backend relay. On unless
+    CODE_QUORUM_OPENCODE_RELAY is explicitly set to a falsey value."""
+    env = os.environ if environ is None else environ
+    val = env.get(_RELAY_ENV_VAR, "1").strip().lower()
+    return val not in ("0", "false", "no", "off", "")
+
+
+def _unpinned_backends(model_id: str, summary: dict[str, int]) -> list[str]:
+    """Backends in a relay summary that are not in the model's _PROVIDER_ORDER
+    pin. The ledger carries OpenRouter's display names ("Novita"), the pin
+    holds slugs ("novita"), so the match is case-insensitive. `(none)` is the
+    relay's marker for a request that ended without a backend (an error, a
+    non-chat path) and is not a backend. An unpinned model flags nothing."""
+    order = _PROVIDER_ORDER.get(model_id)
+    if order is None:
+        return []
+    pinned = {name.lower() for name in order}
+    return [name for name in summary if name != "(none)" and name.lower() not in pinned]
 
 
 def _capture_reason(*, text: str, returncode: int, idle_timed_out: bool) -> str | None:
@@ -755,12 +843,73 @@ class OpenCodeAgent(Agent):
                 duration_s=time.monotonic() - start,
                 unavailable_reason="authentication",
             )
+        relay = await self._start_relay()
+        try:
+            return await self._run_with_relay(
+                prompt=prompt, cwd=cwd, api_key=api_key, relay=relay, start=start
+            )
+        finally:
+            if relay is not None:
+                await relay.stop()
+                self._report_served(relay)
+
+    async def _start_relay(self) -> OpenRouterRelay | None:
+        """Start the served-backend relay for this run, or return None to run
+        direct: the model is not on OpenRouter, the env knob is off, or the
+        loopback bind failed (logged -- the seat must never lose a call to
+        its own bookkeeping)."""
+        if not self.model.startswith(_OPENROUTER_PREFIX) or not _relay_enabled():
+            return None
+        relay = OpenRouterRelay()
+        try:
+            await relay.start()
+        except OSError as exc:
+            logger.warning(
+                "opencode served-backend relay could not start (%s); running "
+                "direct to OpenRouter -- this run's backend will not be recorded.",
+                exc,
+            )
+            return None
+        return relay
+
+    def _report_served(self, relay: OpenRouterRelay) -> None:
+        """Log which backends served this run's requests, and warn when one is
+        outside the model's provider pin -- the audit the relay exists for."""
+        summary = relay.summary()
+        if not summary:
+            return
+        logger.info("opencode served backends: %s", summary)
+        model_id = self.model[len(_OPENROUTER_PREFIX) :]
+        unpinned = _unpinned_backends(model_id, summary)
+        if unpinned:
+            logger.warning(
+                "opencode turn served by %s, outside the pinned order %s for %s "
+                "(ledger: %s)",
+                ", ".join(unpinned),
+                _PROVIDER_ORDER[model_id],
+                model_id,
+                relay.ledger_path,
+            )
+
+    async def _run_with_relay(
+        self,
+        *,
+        prompt: str,
+        cwd: str,
+        api_key: str,
+        relay: OpenRouterRelay | None,
+        start: float,
+    ) -> AgentResult:
         sandbox_home = _ensure_sandbox_home(model=self.model)
         _maintain_debug_dir(_DEBUG_DIR, create=False)
         # Bound the sandbox npm cache before invoking opencode. Size-gated, so
         # this is a cheap stat on the common path and only fires occasionally.
         await _prune_npm_cache(sandbox_home)
-        env = _build_subprocess_env(sandbox_home, api_key)
+        env = _build_subprocess_env(
+            sandbox_home,
+            api_key,
+            relay_base_url=relay.base_url if relay is not None else None,
+        )
         cmd = self.build_command(prompt=prompt, cwd=cwd)
         # Retry only an empty completion (OPENCODE_NO_OUTPUT_RC) -- a transient
         # upstream flake that, left alone, drops opencode from later council

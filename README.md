@@ -1,5 +1,7 @@
 # code-quorum
 
+> **Purpose:** what code-quorum is, how to install it, how to use it. **Use:** read this first when new here; update it in the same PR as any change to install or usage. Layout and reasons are in ARCHITECTURE.md; agent conventions in CLAUDE.md.
+
 Independent reviews have become an important part of how I use agentic tools.
 Inspired by similar work, I built Code Quorum for my own use and am sharing it
 in case others find it useful.
@@ -10,8 +12,8 @@ parallel. A structural anti-bias gate keeps every perspective independent until
 the final synthesis.
 
 It can use existing Claude Code, ChatGPT/Codex, and Gemini/Antigravity
-subscriptions. The OpenCode seat uses OpenRouter, with DeepSeek V4 Flash as its
-default model. Both CLI hosts are supported, along with Codex in the ChatGPT
+subscriptions. The OpenCode seat uses OpenRouter, with DeepSeek V4.1 Flash as
+its default model. Both CLI hosts are supported, along with Codex in the ChatGPT
 desktop app and the Code surface in the Claude desktop app.
 
 | Host | Default external council |
@@ -30,10 +32,10 @@ material.
 
 Every repository-reading MCP council start requires an explicit absolute project
 `cwd`. The MCP tools reject an omitted or blank value rather than falling back
-to the server's plugin-cache or runtime directory. The host skills supply this
-value during normal `/q-*` and `$code-quorum:q-*` use. Plan and scope files must
-also resolve inside that directory; absolute paths, `..` traversal, and symlink
-escapes are rejected before their contents are read.
+to the server's own directory, and the host skills supply it during normal
+`/q-*` and `$code-quorum:q-*` use. Plan and scope files must resolve inside that
+directory; a path outside it, `..` traversal, and symlink escapes are rejected
+before any read.
 
 ## Workflows
 
@@ -69,8 +71,8 @@ Use `--purpose methods` (default) for balanced all-time and recent OpenAlex
 strata, or `--purpose currency` for the recent five-year stratum only. Literature
 sources search every lane; artifact sources (Context7, GitHub, and Hugging Face)
 search only the primary lane to avoid redundant results and API traffic. The
-per-source result limit stays fixed across lanes, so additional lanes broaden
-coverage without growing the digest without bound.
+per-source result limit stays fixed across lanes, so extra lanes broaden
+coverage without inflating the digest.
 
 | Source | Target | Credential policy |
 |---|---|---|
@@ -82,11 +84,10 @@ coverage without growing the digest without bound.
 | GitHub (`github`) | Public repositories matched by name, description, and topics, then ranked by stars. | `GH_TOKEN` or `GITHUB_TOKEN` is recommended for higher limits. Private repositories are excluded. |
 | Hugging Face (`huggingface`) | Public model IDs and metadata, ranked by downloads. Term-fallback results carry `[broadened]`. | `HF_TOKEN` or `QUORUM_HF_TOKEN` is recommended for account-level Hub limits. Private models are filtered out. |
 
-Code Quorum reads credentials from the process environment and sends tokens
-only in authorization headers. The generated Codex adapter forwards the named
-variables but does not store their values in the plugin artifact. OpenAlex is
-the only source that requires a key for normal use; the others improve
-reliability or rate limits.
+Credentials come from the process environment and go out only in authorization
+headers. The generated Codex adapter forwards the named variables and does not
+store their values. Only OpenAlex needs a key for normal use; the other keys
+raise rate limits.
 
 Verify Hugging Face search from a checkout with:
 
@@ -96,17 +97,16 @@ uv run pytest tests/test_research_live.py -m live -k huggingface -q
 ```
 
 The CLI check must return model links and a nonzero `HuggingFace` source count.
-The live tests cover direct search, configured-token authentication,
-distinctive-term union, and the full `research_topic` path. Without a token,
-the authentication test skips while anonymous checks still run.
+Without a token, the authentication test skips and the anonymous checks still
+run.
 
 ## Requirements
 
-Code Quorum currently supports macOS and requires Python 3.13+, the
-[`uv`](https://docs.astral.sh/uv/) package manager, and the binaries for the
-seats you intend to use. Each seat relies on its own login or key; Code Quorum
-does not write credential values into plugin artifacts. Seat CLIs retain their
-own authentication and runtime state as described in [SECURITY.md](SECURITY.md).
+Code Quorum requires Python 3.13+, the [`uv`](https://docs.astral.sh/uv/)
+package manager, and the binaries for the seats you use. Each seat relies on
+its own login or key; Code Quorum does not write credential values into plugin
+artifacts. Seat CLIs retain their own authentication and runtime state,
+described in [SECURITY.md](SECURITY.md).
 
 | Seat | Binary | Auth | Cost |
 |---|---|---|---|
@@ -210,6 +210,7 @@ uv run quorum setup-models --seat codex --model gpt-5.6-terra --effort medium
 | `CODE_QUORUM_GEMINI_BACKEND` | `cli` (subscription) or `sdk` (metered `GEMINI_API_KEY`) |
 | `CODE_QUORUM_OPENCODE_MODEL` | OpenCode seat model |
 | `CODE_QUORUM_OPENCODE_DEBUG` | `0` disables failed-run diagnostic capture |
+| `CODE_QUORUM_OPENCODE_RELAY` | `0` disables the served-backend relay |
 | `CODE_QUORUM_CLAUDE_MODEL` / `_EFFORT` | Claude seat model and effort |
 | `CODE_QUORUM_CODEX_MODEL` / `_EFFORT` | Codex seat model and reasoning effort |
 
@@ -218,8 +219,10 @@ uv run quorum setup-models --seat codex --model gpt-5.6-terra --effort medium
 The OpenCode seat requires `OPENROUTER_API_KEY` and does not load your personal
 OpenCode configuration. It uses an isolated HOME and rebuilds this generated
 configuration before every run. The shipped model is
-`openrouter/deepseek/deepseek-v4-flash`; its OpenRouter `chunkTimeout` is
-`90000` milliseconds.
+`openrouter/deepseek/deepseek-v4.1-flash`, pinned to the Novita and Parasail
+backends (fp8) with OpenRouter `reasoning.effort` set to `medium`; its
+OpenRouter `chunkTimeout` is `90000` milliseconds. Evidence:
+`docs/adr/0001-opencode-seat-v41-flash-medium.md`.
 
 Code Quorum sets `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `OPENCODE_PURE=1`.
 The generated council agent permits only `Read`, `glob`, and `list`, denies
@@ -228,7 +231,9 @@ shell and mutation tools, blocks `.env` and `.env.*`, and permits
 `~/.cache/code-quorum/opencode-debug` unless
 `CODE_QUORUM_OPENCODE_DEBUG=0` is set. The directory is `0700`, capture files
 are `0600`, prompt text is omitted from command metadata, and only the newest 20
-captures are retained. Raw streams can still contain reviewed material. See
+captures are retained. Raw streams can still contain reviewed material. A loopback relay records
+which OpenRouter backend served each request in
+`~/.cache/code-quorum/opencode-served.jsonl`. See
 [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md) for the full
 boundary design.
 
