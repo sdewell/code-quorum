@@ -35,6 +35,7 @@ _HOOK_SCRIPTS = (
     "agy-drift-nag.sh",
     "prune_opencode_db.py",
     "quorum_servers.py",
+    "unawaited_job_stop_hook.py",
 )
 _CODEX_SCRIPTS = (*_HOOK_SCRIPTS, CODEX_PATH_LAUNCHER, CODEX_MCP_LAUNCHER)
 

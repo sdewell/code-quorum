@@ -103,7 +103,16 @@ The MCP surface exposes `q_plan_start` / `q_brainstorm_start` /
 explicit absolute project `cwd`, accepts `host="claude"|"codex"`, and passes
 both through the shared orchestration path. Missing or blank `cwd` values fail
 before a job is created. `jobs.py` runs councils as background tasks with a TTL
-reaper. The CLI stays synchronous.
+reaper. The CLI stays synchronous. A job lives only in server memory, so
+`hooks/hooks.json` adds a Stop hook (`scripts/unawaited_job_stop_hook.py`) that
+reads either host's transcript and blocks the end of a turn while a started
+job has no `q_await` call. Claude Code supplies tool-use/result blocks; Codex
+supplies structured `McpToolCall` completion events, including calls through
+code mode. The hook ignores expired jobs and allows the retry after one block.
+A Codex CLI 0.154.0 smoke test with a stub MCP server verified that the hook
+continued the turn and Codex called `q_await`; the original hook let it stop
+without collecting the job. Codex hook discovery and consent follow the
+[host hook contract](https://learn.chatgpt.com/docs/hooks).
 
 ### Plugin packaging
 
@@ -111,8 +120,8 @@ Claude installs the source tree directly through `.claude-plugin/plugin.json`;
 its `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`. Codex requires conventional
 `skills/` and `.mcp.json` paths, so `.codex-plugin/plugin.json` points at the
 same shared tree and `build_codex_marketplace.py` stages a self-contained local
-marketplace, including the shared SessionStart hooks and their three referenced
-housekeeping scripts, while rewriting `.mcp.json` to use the staged plugin
+marketplace, including the shared SessionStart hooks, the Stop hook, and their
+four referenced scripts, while rewriting `.mcp.json` to use the staged plugin
 directory. The generated Codex adapter deliberately names its server
 `quorum_codex`, producing the `mcp__quorum_codex__*` tool prefix, while Claude
 keeps its existing `quorum` identity and `mcp__plugin_code-quorum_quorum__*`

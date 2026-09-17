@@ -67,9 +67,10 @@ def test_build_codex_marketplace_stages_installable_plugin(tmp_path: Path) -> No
     assert (plugin / "quorum" / "orchestration.py").is_file()
     session_start = hooks["hooks"]["SessionStart"]
     assert isinstance(session_start, list)
+    all_entries = [entry for event in hooks["hooks"].values() for entry in event]
     commands = [
         hook["command"]
-        for entry in session_start
+        for entry in all_entries
         for hook in entry["hooks"]
         if hook["type"] == "command"
     ]

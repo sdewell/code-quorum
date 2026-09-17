@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # budget are chosen together. The council uses 3.1 Pro High -- the strongest the
 # AI Pro plan unlocks. Pro spends quota faster than Flash across a multi-round,
 # multi-seat council, so dial back per run with
-# CODE_QUORUM_GEMINI_MODEL="gemini-3.5-flash-high" (that slug is verified to
+# CODE_QUORUM_GEMINI_MODEL="gemini-3.7-flash-high" (that slug is verified to
 # route correctly) or per-instance via GeminiCliAgent(model=...).
 DEFAULT_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_MODEL_CATALOG_SLUG = "gemini-3.1-pro-high"
@@ -73,7 +73,7 @@ DEFAULT_MODEL_CATALOG_SLUG = "gemini-3.1-pro-high"
 # name beats this map quietly turning it into some other model.
 MODEL_ROUTING_ALIASES = {
     DEFAULT_MODEL_CATALOG_SLUG: DEFAULT_MODEL,
-    "gemini-3.5-flash-high": "Gemini 3.5 Flash (High)",
+    "gemini-3.7-flash-high": "Gemini 3.7 Flash (High)",
 }
 
 
@@ -203,7 +203,9 @@ REQUIRED_DENY = (
 # Claude fallback routed to its promised backend but had no remaining quota, so
 # completion was recorded by the verifier's explicit advisory warning rather
 # than gating the independent containment proof.
-SEAT_VERIFIED_AGY_VERSION = "1.1.20"
+# 1.2.5 verified 2026-09-17: all 10 live checks passed, including the current
+# Gemini 3.7 Flash (High) override, Pro, and the Claude fallback.
+SEAT_VERIFIED_AGY_VERSION = "1.2.5"
 
 
 def _sbpl(path: str | Path) -> str:
@@ -735,8 +737,8 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # degraded -- a silently mis-routed fallback would make that label a lie too.
 # Flash is included because the documented quota-saver slug is normalized to its
 # display form; every alias target must be live-proven before that rewrite can be
-# called safe. (The original two were verified live on agy 1.1.8, 2026-07-29;
-# all three were re-verified on 1.1.13, 2026-08-14.)
+# called safe. Flash tracks the current 3.7 High choice; changing it requires
+# rerunning the live verifier before advancing SEAT_VERIFIED_AGY_VERSION.
 # COVERAGE BOUNDARY, stated so the next person does not have to infer it: this
 # dict is exactly the models whose routing is PROVEN: the primary, the documented
 # Flash override, and the automatic quota fallback. Every other configurable
@@ -746,7 +748,7 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # surface rather than covering the whole catalog.
 AGY_EXPECTED_BACKEND_LABEL = {
     DEFAULT_MODEL: "Gemini 3.1 Pro (High)",
-    "Gemini 3.5 Flash (High)": "Gemini 3.5 Flash (High)",
+    "Gemini 3.7 Flash (High)": "Gemini 3.7 Flash (High)",
     AGY_QUOTA_FALLBACK_MODEL: "Claude Opus 4.6 (Thinking)",
 }
 

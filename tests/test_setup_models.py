@@ -57,7 +57,7 @@ def test_parse_agy_models_preserves_listing_order() -> None:
         "gemini-3.7-pro-high",
         "gemini-3.7-pro-low",
         "gemini-3.1-pro-high",
-        "gemini-3.5-flash-high",
+        "gemini-3.7-flash-high",
         "claude-opus-4-6-thinking",
     ]
 

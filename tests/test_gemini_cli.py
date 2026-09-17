@@ -383,9 +383,9 @@ def test_build_command_shape() -> None:
 
 def test_build_command_model_and_timeout_override() -> None:
     cmd = GeminiCliAgent(
-        model="gemini-3.5-flash-low", print_timeout=120.0
+        model="gemini-3.7-flash-low", print_timeout=120.0
     ).build_command(prompt="x", cwd="/r", sandbox_profile="/tmp/p.sb")
-    assert cmd[cmd.index("--model") + 1] == "gemini-3.5-flash-low"
+    assert cmd[cmd.index("--model") + 1] == "gemini-3.7-flash-low"
     assert cmd[cmd.index("--print-timeout") + 1] == "120s"
 
 
@@ -1281,7 +1281,7 @@ def test_resolved_backend_labels_reads_routing_from_the_log(tmp_path: Path) -> N
     [
         ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
         ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
-        ("gemini-3.5-flash-high", "Gemini 3.5 Flash (High)"),
+        ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
     ],
 )
 def test_routing_key_collapses_agys_two_naming_conventions(
@@ -2120,10 +2120,10 @@ def test_factory_default_model_is_pro() -> None:  # conftest clears the env
 def test_factory_model_override(monkeypatch) -> None:
     # CODE_QUORUM_GEMINI_MODEL lets the user dial back to Flash (or any model)
     # without a code change -- the quota-adjust lever.
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.5-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.7-flash-high")
     agent = make_gemini_agent()
     assert isinstance(agent, GeminiCliAgent)
-    assert agent.model == "Gemini 3.5 Flash (High)"
+    assert agent.model == "Gemini 3.7 Flash (High)"
 
 
 def test_factory_model_env_override_empty_falls_back_to_default(monkeypatch) -> None:
@@ -2158,9 +2158,9 @@ def test_pro_slug_alias_is_case_insensitive() -> None:
 
 
 def test_advertised_flash_slug_is_rewritten_to_its_display_name() -> None:
-    agent = GeminiCliAgent(model="gemini-3.5-flash-high")
+    agent = GeminiCliAgent(model="gemini-3.7-flash-high")
 
-    assert agent.model == "Gemini 3.5 Flash (High)"
+    assert agent.model == "Gemini 3.7 Flash (High)"
 
 
 def test_a_padded_misrouting_slug_is_still_rewritten() -> None:
@@ -2257,7 +2257,7 @@ def test_select_agents_gemini_cli_flag(monkeypatch) -> None:
 def test_factory_model_override_param_beats_env(monkeypatch) -> None:
     # The param is the per-invocation ask ("use Claude for this run"); the env
     # var is ambient session state. Explicit beats ambient.
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.5-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.7-flash-high")
     agent = make_gemini_agent(model_override="claude-opus-4-6-thinking")
     assert isinstance(agent, GeminiCliAgent)
     assert agent.model == "claude-opus-4-6-thinking"
@@ -2353,10 +2353,10 @@ def test_factory_env_override_source_is_env_not_recorded(
         "gemini", {"model": "recorded-model", "cli_version": "1.1.8"}, path
     )
     monkeypatch.setattr(mc, "CONFIG_PATH", path)
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.5-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.7-flash-high")
     agent = make_gemini_agent()
     assert isinstance(agent, GeminiCliAgent)
-    assert agent.model == "Gemini 3.5 Flash (High)"
+    assert agent.model == "Gemini 3.7 Flash (High)"
     assert agent.model_source == "env"
     # The version-drift check is keyed off recorded_choice() alone, same as
     # codex/opencode -- it fires regardless of which source won the model.
