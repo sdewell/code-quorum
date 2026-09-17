@@ -511,7 +511,7 @@ def setup_agy() -> None:
     typer.echo(
         f"The council's Gemini seat is read-only because it runs agy under a "
         f"seatbelt sandbox (model {DEFAULT_MODEL!r}). Conserve quota with: export "
-        "CODE_QUORUM_GEMINI_MODEL=gemini-3.7-flash-high, or opt out with: "
+        "CODE_QUORUM_GEMINI_MODEL=gemini-3.8-flash-high, or opt out with: "
         "export CODE_QUORUM_GEMINI_BACKEND=sdk"
     )
     typer.echo(

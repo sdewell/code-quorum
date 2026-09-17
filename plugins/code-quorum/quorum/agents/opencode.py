@@ -339,15 +339,14 @@ _OUTPUT_TOKEN_MAX: dict[str, int] = {
 # Per-model OpenRouter `reasoning.effort`. Only for models where the knob was
 # measured to do something: on V4 Flash `effort=low` was accepted and ignored
 # (seat-eval 2026-08-27, ~34K reasoning tokens either way). On V4.1 Flash
-# (2026-09-15 probe, docs/adr/0001) medium was the one level that held steady
-# across providers -- 5.2-6.7K reasoning tokens over four runs on two
-# backends, answers complete in 35-42s on Novita -- while low was erratic
-# (1.1K with an empty answer, then 23.7K) and high was indistinguishable from
-# the default (10-32K). One default-effort run reached 34.8K, above opencode's
-# then-fixed 32,000 max_tokens; that cap is now raised (_OUTPUT_TOKEN_MAX,
-# docs/adr/0002), so the effort choice no longer has to guard it.
+# (2026-09-15 probe, docs/adr/0001) the knob works: medium held steady at
+# 5.2-6.7K reasoning tokens, high ran 10.6-15.2K, low was erratic (1.1K with
+# an empty answer, then 23.7K). ADR 0001 chose medium partly to stay under
+# opencode's then-fixed 32,000 max_tokens; ADR 0002 raised that cap to
+# 256,000, and S then chose high (2026-09-17, docs/adr/0003) for the seat's
+# review work. Cost is the trade: about 2x the reasoning tokens of medium.
 _REASONING_EFFORT: dict[str, str] = {
-    "deepseek/deepseek-v4.1-flash": "medium",
+    "deepseek/deepseek-v4.1-flash": "high",
 }
 
 

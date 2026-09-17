@@ -220,7 +220,7 @@ The OpenCode seat requires `OPENROUTER_API_KEY` and does not load your personal
 OpenCode configuration. It uses an isolated HOME and rebuilds this generated
 configuration before every run. The shipped model is
 `openrouter/deepseek/deepseek-v4.1-flash`, routed only to the Novita and
-Parasail backends (fp8) with OpenRouter `reasoning.effort` set to `medium`; its
+Parasail backends (fp8) with OpenRouter `reasoning.effort` set to `high`; its
 OpenRouter `chunkTimeout` is `90000` milliseconds, and
 `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` is `256000`.
 

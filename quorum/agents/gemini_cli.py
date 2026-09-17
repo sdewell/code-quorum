@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # budget are chosen together. The council uses 3.1 Pro High -- the strongest the
 # AI Pro plan unlocks. Pro spends quota faster than Flash across a multi-round,
 # multi-seat council, so dial back per run with
-# CODE_QUORUM_GEMINI_MODEL="gemini-3.7-flash-high" (that slug is verified to
+# CODE_QUORUM_GEMINI_MODEL="gemini-3.8-flash-high" (that slug is verified to
 # route correctly) or per-instance via GeminiCliAgent(model=...).
 DEFAULT_MODEL = "Gemini 3.1 Pro (High)"
 DEFAULT_MODEL_CATALOG_SLUG = "gemini-3.1-pro-high"
@@ -73,7 +73,7 @@ DEFAULT_MODEL_CATALOG_SLUG = "gemini-3.1-pro-high"
 # name beats this map quietly turning it into some other model.
 MODEL_ROUTING_ALIASES = {
     DEFAULT_MODEL_CATALOG_SLUG: DEFAULT_MODEL,
-    "gemini-3.7-flash-high": "Gemini 3.7 Flash (High)",
+    "gemini-3.8-flash-high": "Gemini 3.8 Flash (High)",
 }
 
 
@@ -134,18 +134,22 @@ SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # tools by a small set of coarse ACTIONS, not per tool: verified against v1.0.13 and
 # re-verified against v1.1.2 (write a superset deny list, run agy, read settings.json
 # back), the ONLY actions its grant store recognizes are read_file, write_file,
-# command, execute_url, read_url, unsandboxed, mcp -- any other key is silently
-# dropped. So `write_file` covers every file-write tool
-# (write_to_file/replace_file_content/...), `command` covers every shell tool
-# (run_command/...), and the old per-tool keys (edit_file/create_file/delete_file/
-# run_command/execute_command) were phantoms agy stripped -- their removal loses no
-# coverage and stops a self-heal rewrite firing on every council run.
+# command, execute_url, read_url, mcp -- any other key is silently dropped. So
+# `write_file` covers every file-write tool (write_to_file/replace_file_content/
+# ...), `command` covers every shell tool (run_command/...), and the old per-tool
+# keys (edit_file/create_file/delete_file/run_command/execute_command) were
+# phantoms agy stripped -- their removal loses no coverage and stops a self-heal
+# rewrite firing on every council run. `unsandboxed` was a real action through
+# 1.1.x; agy 1.2.5 dropped it and now prints at every start 'Invalid "unsandboxed"
+# permission rules found; they are ignored and grant nothing' (fix: replace with
+# a `command(...)` rule or remove it). It is removed here; `command(*)` already
+# denies the shell it gated, and the seatbelt is the boundary regardless.
 #
 # SAFETY CONTRACT -- denylist completeness. With toolPermission=always-proceed,
 # agy auto-approves any tool NOT covered by a `deny` action, so REQUIRED_DENY must
-# name every gateable non-read action. It does: these 6 are the complete set of
-# non-read actions agy gates -- v1.0.13, re-verified unchanged on v1.1.2 (read_file
-# is the lone allow). The verifier requires exactly this set, so a hand-edit
+# name every gateable non-read action. It does: these 5 are the complete set of
+# non-read actions agy gates -- v1.0.13, re-verified on v1.1.2 and v1.2.5
+# (read_file is the lone allow). The verifier requires this set, so a hand-edit
 # removing any one fails closed.
 #
 # NOT denied, because agy exposes NO grant action for it: web_search (the model's
@@ -163,7 +167,6 @@ REQUIRED_DENY = (
     "command(*)",
     "execute_url(*)",
     "read_url(*)",
-    "unsandboxed(*)",
     "mcp(*)",
 )
 
@@ -204,7 +207,8 @@ REQUIRED_DENY = (
 # completion was recorded by the verifier's explicit advisory warning rather
 # than gating the independent containment proof.
 # 1.2.5 verified 2026-09-17: all 10 live checks passed, including the current
-# Gemini 3.7 Flash (High) override, Pro, and the Claude fallback.
+# Gemini 3.7 Flash (High) override, Pro, and the Claude fallback. Re-verified
+# the same day after the Flash override moved to Gemini 3.8 Flash (High).
 SEAT_VERIFIED_AGY_VERSION = "1.2.5"
 
 
@@ -737,7 +741,7 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # degraded -- a silently mis-routed fallback would make that label a lie too.
 # Flash is included because the documented quota-saver slug is normalized to its
 # display form; every alias target must be live-proven before that rewrite can be
-# called safe. Flash tracks the current 3.7 High choice; changing it requires
+# called safe. Flash tracks the current 3.8 High choice; changing it requires
 # rerunning the live verifier before advancing SEAT_VERIFIED_AGY_VERSION.
 # COVERAGE BOUNDARY, stated so the next person does not have to infer it: this
 # dict is exactly the models whose routing is PROVEN: the primary, the documented
@@ -748,7 +752,7 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # surface rather than covering the whole catalog.
 AGY_EXPECTED_BACKEND_LABEL = {
     DEFAULT_MODEL: "Gemini 3.1 Pro (High)",
-    "Gemini 3.7 Flash (High)": "Gemini 3.7 Flash (High)",
+    "Gemini 3.8 Flash (High)": "Gemini 3.8 Flash (High)",
     AGY_QUOTA_FALLBACK_MODEL: "Claude Opus 4.6 (Thinking)",
 }
 

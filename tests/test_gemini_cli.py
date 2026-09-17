@@ -16,18 +16,20 @@ _REAL_AGY_DENY_ACTIONS = {
     "command(*)",
     "execute_url(*)",
     "read_url(*)",
-    "unsandboxed(*)",
     "mcp(*)",
 }
-# Keys earlier versions of REQUIRED_DENY carried that agy 1.0.13 rejects as unknown
-# actions. They enforced nothing (stripped on normalization) yet made the on-disk
-# config diverge from REQUIRED_DENY, triggering a self-heal rewrite on every run.
+# Keys earlier versions of REQUIRED_DENY carried that agy rejects as unknown
+# actions. They enforced nothing (stripped on normalization, or on 1.2.5 kept in
+# the file but warned about at every start: 'Invalid "unsandboxed" permission
+# rules found; they are ignored and grant nothing') yet made the on-disk config
+# diverge from REQUIRED_DENY or spam the user; they must never return.
 _PHANTOM_DENY_KEYS = {
     "edit_file(*)",
     "create_file(*)",
     "delete_file(*)",
     "run_command(*)",
     "execute_command(*)",
+    "unsandboxed(*)",  # dropped from agy's vocabulary by 1.2.5
 }
 
 _SAFE = {
@@ -41,7 +43,6 @@ _SAFE = {
             "command(*)",
             "execute_url(*)",
             "read_url(*)",
-            "unsandboxed(*)",
             "mcp(*)",
         ],
     },
@@ -55,7 +56,7 @@ def _write(path: Path, data) -> Path:
 
 
 def test_required_deny_is_exactly_agy_real_actions() -> None:
-    # REQUIRED_DENY must list ONLY actions agy 1.0.13 recognizes. Phantom keys --
+    # REQUIRED_DENY must list ONLY actions agy 1.2.5 recognizes. Phantom keys --
     # which agy silently strips on normalization -- enforce nothing and caused a
     # self-heal/normalize thrash on every council run; they must never return.
     assert set(REQUIRED_DENY) == _REAL_AGY_DENY_ACTIONS
@@ -1281,7 +1282,7 @@ def test_resolved_backend_labels_reads_routing_from_the_log(tmp_path: Path) -> N
     [
         ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
         ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
-        ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
+        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
     ],
 )
 def test_routing_key_collapses_agys_two_naming_conventions(
@@ -2120,10 +2121,10 @@ def test_factory_default_model_is_pro() -> None:  # conftest clears the env
 def test_factory_model_override(monkeypatch) -> None:
     # CODE_QUORUM_GEMINI_MODEL lets the user dial back to Flash (or any model)
     # without a code change -- the quota-adjust lever.
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.7-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-high")
     agent = make_gemini_agent()
     assert isinstance(agent, GeminiCliAgent)
-    assert agent.model == "Gemini 3.7 Flash (High)"
+    assert agent.model == "Gemini 3.8 Flash (High)"
 
 
 def test_factory_model_env_override_empty_falls_back_to_default(monkeypatch) -> None:
@@ -2158,9 +2159,9 @@ def test_pro_slug_alias_is_case_insensitive() -> None:
 
 
 def test_advertised_flash_slug_is_rewritten_to_its_display_name() -> None:
-    agent = GeminiCliAgent(model="gemini-3.7-flash-high")
+    agent = GeminiCliAgent(model="gemini-3.8-flash-high")
 
-    assert agent.model == "Gemini 3.7 Flash (High)"
+    assert agent.model == "Gemini 3.8 Flash (High)"
 
 
 def test_a_padded_misrouting_slug_is_still_rewritten() -> None:
@@ -2257,7 +2258,7 @@ def test_select_agents_gemini_cli_flag(monkeypatch) -> None:
 def test_factory_model_override_param_beats_env(monkeypatch) -> None:
     # The param is the per-invocation ask ("use Claude for this run"); the env
     # var is ambient session state. Explicit beats ambient.
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.7-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-high")
     agent = make_gemini_agent(model_override="claude-opus-4-6-thinking")
     assert isinstance(agent, GeminiCliAgent)
     assert agent.model == "claude-opus-4-6-thinking"
@@ -2353,10 +2354,10 @@ def test_factory_env_override_source_is_env_not_recorded(
         "gemini", {"model": "recorded-model", "cli_version": "1.1.8"}, path
     )
     monkeypatch.setattr(mc, "CONFIG_PATH", path)
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.7-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-high")
     agent = make_gemini_agent()
     assert isinstance(agent, GeminiCliAgent)
-    assert agent.model == "Gemini 3.7 Flash (High)"
+    assert agent.model == "Gemini 3.8 Flash (High)"
     assert agent.model_source == "env"
     # The version-drift check is keyed off recorded_choice() alone, same as
     # codex/opencode -- it fires regardless of which source won the model.

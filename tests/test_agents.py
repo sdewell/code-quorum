@@ -541,17 +541,16 @@ def test_build_opencode_config_v41_flash_pins_provider_order() -> None:
     }
 
 
-def test_build_opencode_config_v41_flash_pins_medium_reasoning_effort() -> None:
+def test_build_opencode_config_v41_flash_pins_high_reasoning_effort() -> None:
     # opencode forwards `options.reasoning` verbatim as OpenRouter's
-    # `reasoning` request object (captured on the wire 2026-09-15). Medium is
-    # the only effort level that held steady across providers in the probe
-    # (5.2-6.7K reasoning tokens, n=4); low was erratic (1.1K with an empty
-    # answer, then 23.7K), high and default were indistinguishable and one
-    # default run exceeded opencode's fixed 32K max_tokens.
+    # `reasoning` request object (captured on the wire 2026-09-15). S chose
+    # high on 2026-09-17 (docs/adr/0003): ADR 0001 picked medium partly to
+    # stay under opencode's then-fixed 32K max_tokens, and ADR 0002 raised
+    # that cap to 256K, so the guard reason is gone.
     cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4.1-flash")
     assert cfg is not None
     model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]
-    assert model_cfg["options"]["reasoning"] == {"effort": "medium"}
+    assert model_cfg["options"]["reasoning"] == {"effort": "high"}
 
 
 def test_build_opencode_config_unmeasured_model_sends_no_reasoning_effort() -> None:
