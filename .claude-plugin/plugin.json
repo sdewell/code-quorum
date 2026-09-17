@@ -1,7 +1,7 @@
 {
   "name": "code-quorum",
   "displayName": "Code Quorum",
-  "version": "0.0.74",
+  "version": "0.0.75",
   "description": "Slash commands for /q-plan, /q-brainstorm, /q-skystorm, /q-validate, /q-review, /q-research via the quorum MCP server",
   "author": {
     "name": "sdewell"

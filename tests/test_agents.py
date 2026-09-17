@@ -527,12 +527,16 @@ def test_build_opencode_config_v41_flash_pins_provider_order() -> None:
     # account's zero-data-retention policy (DeepSeek's own endpoint does not).
     # Novita first -- in the 2026-09-15 probe (docs/adr/0001) Parasail was
     # rate-limited upstream on half its requests and 3-8x slower. Fallbacks
-    # stay on so an unavailable backend degrades to the next, same quant.
+    # stay on so an unavailable backend degrades to the next, same quant, and
+    # `only` keeps the fallback inside the pinned list: without it OpenRouter
+    # proceeds past the order to any host, including ones below the output cap
+    # (docs/adr/0002).
     cfg = _build_opencode_config("openrouter/deepseek/deepseek-v4.1-flash")
     assert cfg is not None
     model_cfg = cfg["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]
     assert model_cfg["options"]["provider"] == {
         "order": ["novita", "parasail"],
+        "only": ["novita", "parasail"],
         "allow_fallbacks": True,
     }
 
@@ -945,6 +949,29 @@ def _patch_opencode_run_seams(
 
 
 @pytest.mark.asyncio
+async def test_opencode_run_launches_pinned_model_with_output_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The seat, not just _build_subprocess_env, must hand opencode the cap
+    # (docs/adr/0002): run() with the real env builder, capture the spawn env.
+    envs: list[dict[str, str]] = []
+
+    async def _spawn(*_a: object, **kw: object) -> _FakeProc:
+        envs.append(cast(dict[str, str], kw["env"]))
+        return _FakeProc()
+
+    _patch_opencode_run_seams(monkeypatch, tmp_path, _empty_output_stub([]))
+    monkeypatch.setattr(opencode_mod, "_build_subprocess_env", _build_subprocess_env)
+    monkeypatch.setattr(opencode_mod.asyncio, "create_subprocess_exec", _spawn)
+    monkeypatch.setenv("CODE_QUORUM_OPENCODE_RELAY", "0")
+
+    await OpenCodeAgent().run(prompt="x", cwd="/tmp")
+
+    assert envs
+    assert {e.get("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX") for e in envs} == {"256000"}
+
+
+@pytest.mark.asyncio
 async def test_opencode_run_retries_empty_output_then_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1127,6 +1154,21 @@ def test_opencode_build_subprocess_env_pins_home_and_key(tmp_path: Path) -> None
     assert env["PATH"] == "/usr/bin"
     assert env["ALL_PROXY"] == "socks5://proxy.test:1080"
     assert env["NODE_EXTRA_CA_CERTS"] == "/certs/company.pem"
+
+
+def test_opencode_subprocess_env_raises_output_cap_for_pinned_model(
+    tmp_path: Path,
+) -> None:
+    # opencode sends a fixed max_tokens of 32000; only this env var raises it
+    # (per-model limit.output does not). Wire capture 2026-09-17, docs/adr/0002.
+    env = _build_subprocess_env(
+        tmp_path, "k", base={}, model="openrouter/deepseek/deepseek-v4.1-flash"
+    )
+    assert env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "256000"
+    unpinned = _build_subprocess_env(
+        tmp_path, "k", base={}, model="openrouter/deepseek/deepseek-v4-pro"
+    )
+    assert "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX" not in unpinned
 
 
 def test_opencode_subprocess_env_strips_unrelated_secret_vars(tmp_path: Path) -> None:

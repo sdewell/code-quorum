@@ -313,8 +313,27 @@ _OPENROUTER_PREFIX = "openrouter/"
 # experiment register, and probe data live in the private `sdewell/seat-eval`
 # repository. Fallbacks stay on so an unavailable backend degrades to the next
 # rather than failing the seat.
+#
+# The pinned list is also an allowlist (`only`, docs/adr/0002). With `order`
+# alone and fallbacks on, OpenRouter proceeds past the list to any host once
+# the listed ones fail -- including hosts that cannot serve _OUTPUT_TOKEN_MAX
+# (BaseTen caps V4.1 Flash at 32,768) or that were never checked for flavor.
 _PROVIDER_ORDER: dict[str, list[str]] = {
     "deepseek/deepseek-v4.1-flash": ["novita", "parasail"],
+}
+
+# Per-model output-token cap, passed as OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX.
+# opencode 1.18.25 otherwise sends a fixed `max_tokens: 32000` (reasoning and
+# answer together): its code is `min(model.limit.output, env || 32000)`, so a
+# per-model `limit.output` can lower the cap but never raise it. Wire capture
+# 2026-09-17 (docs/adr/0002): the env var alone moved the sent max_tokens from
+# 32000 to its value. 256,000 sits under every pinned backend's published
+# ceiling (Novita 393,216, Parasail 943,718); the live test
+# tests/test_opencode_output_cap.py re-checks that against OpenRouter. Only a
+# model with a _PROVIDER_ORDER pin gets a cap, because an unpinned model could
+# route to a host below it.
+_OUTPUT_TOKEN_MAX: dict[str, int] = {
+    "deepseek/deepseek-v4.1-flash": 256_000,
 }
 
 # Per-model OpenRouter `reasoning.effort`. Only for models where the knob was
@@ -324,10 +343,9 @@ _PROVIDER_ORDER: dict[str, list[str]] = {
 # across providers -- 5.2-6.7K reasoning tokens over four runs on two
 # backends, answers complete in 35-42s on Novita -- while low was erratic
 # (1.1K with an empty answer, then 23.7K) and high was indistinguishable from
-# the default (10-32K). Medium also keeps completions near 8K tokens, under
-# opencode's fixed 32,000 max_tokens (captured on the wire; the per-model
-# `limit.output` setting does not raise it), which one default-effort run
-# exceeded at 34.8K -- a truncated answer the seat would report as empty.
+# the default (10-32K). One default-effort run reached 34.8K, above opencode's
+# then-fixed 32,000 max_tokens; that cap is now raised (_OUTPUT_TOKEN_MAX,
+# docs/adr/0002), so the effort choice no longer has to guard it.
 _REASONING_EFFORT: dict[str, str] = {
     "deepseek/deepseek-v4.1-flash": "medium",
 }
@@ -337,7 +355,7 @@ def _provider_routing(model_id: str) -> dict:
     order = _PROVIDER_ORDER.get(model_id)
     if order is None:
         return {"sort": "throughput"}
-    return {"order": list(order), "allow_fallbacks": True}
+    return {"order": list(order), "only": list(order), "allow_fallbacks": True}
 
 
 def _model_options(model_id: str) -> dict:
@@ -509,14 +527,20 @@ def _build_subprocess_env(
     api_key: str,
     base: dict[str, str] | None = None,
     relay_base_url: str | None = None,
+    model: str | None = None,
 ) -> dict[str, str]:
     """Construct the minimal opencode environment and pin its private HOME.
     `relay_base_url`, when set, routes the openrouter provider through the
-    served-backend relay (see _relay_config_content)."""
+    served-backend relay (see _relay_config_content). `model`, when it has an
+    _OUTPUT_TOKEN_MAX entry, raises opencode's fixed 32,000 output cap."""
     env = allowlisted_seat_subprocess_env(base=base)
     env["HOME"] = str(sandbox_home)
     env["OPENROUTER_API_KEY"] = api_key
     env.update(_PROJECT_DISABLE_ENV)
+    if model is not None and model.startswith(_OPENROUTER_PREFIX):
+        cap = _OUTPUT_TOKEN_MAX.get(model[len(_OPENROUTER_PREFIX) :])
+        if cap is not None:
+            env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(cap)
     if relay_base_url is not None:
         env["OPENCODE_CONFIG_CONTENT"] = _relay_config_content(relay_base_url)
     return env
@@ -909,6 +933,7 @@ class OpenCodeAgent(Agent):
             sandbox_home,
             api_key,
             relay_base_url=relay.base_url if relay is not None else None,
+            model=self.model,
         )
         cmd = self.build_command(prompt=prompt, cwd=cwd)
         # Retry only an empty completion (OPENCODE_NO_OUTPUT_RC) -- a transient

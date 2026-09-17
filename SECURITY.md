@@ -90,8 +90,9 @@ OpenCode configuration. Each run uses an isolated HOME at
 `~/.cache/code-quorum/opencode-sandbox`, and Code Quorum rebuilds this generated
 configuration before each run.
 
-The shipped model is `openrouter/deepseek/deepseek-v4.1-flash`, routed to the
-Novita and Parasail backends. DeepSeek's own endpoint is not in that order:
+The shipped model is `openrouter/deepseek/deepseek-v4.1-flash`, routed only to
+the Novita and Parasail backends (OpenRouter `only`, so a fallback cannot reach
+another host). DeepSeek's own endpoint is not in that list:
 it fails the OpenRouter account's zero-data-retention and no-training policy,
 and both listed backends pass it. Its generated configuration sets the
 OpenRouter `chunkTimeout` to `90000` milliseconds, `reasoning.effort` to `medium`, and
