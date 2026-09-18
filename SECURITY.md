@@ -73,9 +73,11 @@ council seat, not interactive `agy` use.
 
 Each agy attempt writes a diagnostic log containing routing/error evidence and
 potentially reviewed prompt material. Code Quorum pre-creates the log directory
-as `0700`, files as `0600`, deletes ordinary successful-attempt logs, and retains
-at most the newest 20 diagnostic logs needed to explain failures or model
-substitutions.
+as `0700`, files as `0600`, and deletes ordinary successful-attempt logs. A log
+kept to explain a failure or a model substitution is renamed out of the transient
+pool (`code-quorum-kept-*.log`) and counted separately: at most the newest 20
+transient reservations and, apart from those, at most the newest 20 kept logs.
+A burst of live runs therefore cannot evict a failure's only record.
 
 On a Codex host, Claude and Gemini run through a narrowly scoped LaunchAgent
 helper because their containment cannot start inside Codex's outer sandbox.

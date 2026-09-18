@@ -208,7 +208,8 @@ REQUIRED_DENY = (
 # than gating the independent containment proof.
 # 1.2.5 verified 2026-09-17: all 10 live checks passed, including the current
 # Gemini 3.7 Flash (High) override, Pro, and the Claude fallback. Re-verified
-# the same day after the Flash override moved to Gemini 3.8 Flash (High).
+# the same day after the Flash override moved to Gemini 3.8 Flash (High), and
+# again with the read-outside-workspace canary added (11 live checks).
 SEAT_VERIFIED_AGY_VERSION = "1.2.5"
 
 
@@ -765,6 +766,13 @@ _AGY_BACKEND_LABEL_RE = re.compile(
 # sessions from colliding.
 AGY_RUN_LOG_DIR = AGY_SETTINGS_PATH.parent / "log"
 AGY_RUN_LOG_MAX_FILES = 20
+# Kept failure logs leave the transient pool at keep time and live under their
+# own prefix with their own cap. Before this split, one live verifier pass
+# (more than AGY_RUN_LOG_MAX_FILES reservations in a minute) evicted the only
+# record of a council failure from the same hour (2026-09-17).
+AGY_KEPT_LOG_MAX_FILES = 20
+_RUN_LOG_PREFIX = "code-quorum-run-"
+_KEPT_LOG_PREFIX = "code-quorum-kept-"
 
 
 def _new_run_log_path() -> Path:
@@ -776,12 +784,34 @@ def _new_run_log_path() -> Path:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(fd)
     logs = sorted(
-        AGY_RUN_LOG_DIR.glob("code-quorum-run-*.log"),
+        AGY_RUN_LOG_DIR.glob(f"{_RUN_LOG_PREFIX}*.log"),
         key=lambda candidate: candidate.stat(follow_symlinks=False).st_mtime,
     )
     for stale in logs[:-AGY_RUN_LOG_MAX_FILES]:
         stale.unlink(missing_ok=True)
     return path
+
+
+def _retain_failure_log(path: Path) -> Path:
+    """Move a pooled reservation out of the transient pool so later
+    _new_run_log_path() calls cannot evict it, and prune kept logs by their
+    own count. Returns the path the log now lives at. A log that did not come
+    from the pool (tests route reservations elsewhere) is left in place:
+    nothing prunes it there, and its owner holds the original path."""
+    if not path.name.startswith(_RUN_LOG_PREFIX):
+        return path
+    kept = path.with_name(_KEPT_LOG_PREFIX + path.name[len(_RUN_LOG_PREFIX) :])
+    try:
+        os.rename(path, kept)
+    except OSError:
+        return path
+    logs = sorted(
+        path.parent.glob(f"{_KEPT_LOG_PREFIX}*.log"),
+        key=lambda candidate: candidate.stat(follow_symlinks=False).st_mtime,
+    )
+    for stale in logs[:-AGY_KEPT_LOG_MAX_FILES]:
+        stale.unlink(missing_ok=True)
+    return kept
 
 
 def _log_shows_quota_exhaustion(run_log: Path) -> bool:
@@ -1384,6 +1414,7 @@ class GeminiCliAgent(Agent):
             profile_path = fh.name
         run_logs: list[Path] = []
         keep_logs: set[Path] = set()
+        kept_paths: list[Path] = []
 
         def _next_log() -> Path | None:
             """Reserve a per-attempt log path, or None when it can't be
@@ -1396,6 +1427,16 @@ class GeminiCliAgent(Agent):
                 return None
             run_logs.append(path)
             return path
+
+        def _keep(path: Path) -> Path:
+            # Retain a failed attempt's log outside the transient pool. The
+            # old name stays in keep_logs so the finally block skips it; the
+            # new name is what every message and the end-of-run warning cite.
+            kept = _retain_failure_log(path)
+            keep_logs.add(path)
+            keep_logs.add(kept)
+            kept_paths.append(kept)
+            return kept
 
         try:
             attempt_start = time.monotonic()
@@ -1434,7 +1475,7 @@ class GeminiCliAgent(Agent):
                 if retry_initial_log is not None and (
                     result.returncode != 0 or active_log is None
                 ):
-                    keep_logs.add(retry_initial_log)
+                    retry_initial_log = _keep(retry_initial_log)
                     note = (
                         "initial failed-attempt diagnostic log kept at "
                         f"{retry_initial_log}"
@@ -1470,7 +1511,7 @@ class GeminiCliAgent(Agent):
                 if auth_retry_initial_log is not None and (
                     result.returncode != 0 or active_log is None
                 ):
-                    keep_logs.add(auth_retry_initial_log)
+                    auth_retry_initial_log = _keep(auth_retry_initial_log)
                     note = (
                         "initial OAuth-refresh network-failure diagnostic log kept "
                         f"at {auth_retry_initial_log}"
@@ -1501,7 +1542,7 @@ class GeminiCliAgent(Agent):
             ):
                 # The evidence log outlives the run because it is the only
                 # record of why the seat switched engines.
-                keep_logs.add(active_log)
+                active_log = _keep(active_log)
                 logger.warning(
                     "agy seat: %s died with quota evidence (RESOURCE_EXHAUSTED/"
                     "429 in its run log); re-running once on fallback model %s.",
@@ -1563,7 +1604,7 @@ class GeminiCliAgent(Agent):
                     labels = resolved_backend_labels(active_log)
                     complaint = routing_complaint(asked_model, labels)
                 if active_log is not None and complaint:
-                    keep_logs.add(active_log)
+                    active_log = _keep(active_log)
                     # The invariant enforcement applies only to the PRIMARY
                     # recorded model (asked_model == self.model) -- the agy
                     # quota reflex's fallback attempt is a pre-existing,
@@ -1606,7 +1647,7 @@ class GeminiCliAgent(Agent):
                     # thing that shows what agy's format changed to. A normal run
                     # always carries a label, so this must not be routine; if it
                     # ever is, this warning is how we find out immediately.
-                    keep_logs.add(active_log)
+                    active_log = _keep(active_log)
                     message = (
                         "agy completed but its log carries no routing line, so "
                         f"{asked_model!r} could not be verified; diagnostic log "
@@ -1624,7 +1665,7 @@ class GeminiCliAgent(Agent):
                 # agy's default cli-*.log (live-probed), so deleting it would
                 # erase the sole record.
                 if active_log is not None:
-                    keep_logs.add(active_log)
+                    active_log = _keep(active_log)
                 # A recorded model that vanished from agy's registry fails
                 # here as a plain nonzero exit with no pointer -- unlike the
                 # routing-mismatch hard-fail above (RC 5), which already
@@ -1655,10 +1696,10 @@ class GeminiCliAgent(Agent):
                 if active_log is not None:
                     result.error = _with_diagnostic_log(result.error, active_log)
             _apply_version_warning(result, version_warn)
-            if keep_logs:
+            if kept_paths:
                 logger.warning(
                     "agy run log(s) kept for diagnosis: %s",
-                    ", ".join(str(p) for p in run_logs if p in keep_logs),
+                    ", ".join(str(p) for p in kept_paths),
                 )
             return result
         finally:

@@ -1432,6 +1432,60 @@ def test_new_run_log_path_prunes_oldest_retained_log(
     assert len(list(log_dir.glob("code-quorum-run-*.log"))) == gc.AGY_RUN_LOG_MAX_FILES
 
 
+def test_retained_failure_log_survives_later_reservations(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # A failed run's kept log is the only record of why the seat failed, and
+    # the transient pool's count cap used to be its only protection -- one
+    # live verifier pass reserves more than AGY_RUN_LOG_MAX_FILES slots and
+    # evicted the log of a council failure from the same hour. Kept logs
+    # leave the pool at keep time and are pruned by their own count.
+    log_dir = tmp_path / "antigravity-cli" / "log"
+    monkeypatch.setattr(gc, "AGY_RUN_LOG_DIR", log_dir)
+    failed = gc._new_run_log_path()
+    failed.write_text("E0917 RESOURCE_EXHAUSTED\n", encoding="utf-8")
+
+    kept = gc._retain_failure_log(failed)
+
+    assert kept.parent == log_dir
+    assert kept.name.startswith("code-quorum-kept-")
+    assert not failed.exists()
+    for _ in range(gc.AGY_RUN_LOG_MAX_FILES + 5):
+        gc._new_run_log_path()
+    assert kept.exists(), "a burst of reservations evicted the failure log"
+    assert kept.read_text(encoding="utf-8") == "E0917 RESOURCE_EXHAUSTED\n"
+    assert len(list(log_dir.glob("code-quorum-run-*.log"))) == gc.AGY_RUN_LOG_MAX_FILES
+
+
+def test_retained_failure_logs_prune_by_their_own_count(
+    monkeypatch, tmp_path: Path
+) -> None:
+    log_dir = tmp_path / "antigravity-cli" / "log"
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(gc, "AGY_RUN_LOG_DIR", log_dir)
+    for index in range(gc.AGY_KEPT_LOG_MAX_FILES):
+        path = log_dir / f"code-quorum-kept-{index:02d}.log"
+        path.write_text("old", encoding="utf-8")
+        os.utime(path, (index + 1, index + 1))
+    oldest = log_dir / "code-quorum-kept-00.log"
+    fresh = gc._new_run_log_path()
+    fresh.write_text("new", encoding="utf-8")
+
+    kept = gc._retain_failure_log(fresh)
+
+    assert kept.exists()
+    assert not oldest.exists()
+    assert (
+        len(list(log_dir.glob("code-quorum-kept-*.log"))) == gc.AGY_KEPT_LOG_MAX_FILES
+    )
+    # A log that never came from the pool is left where it is: nothing can
+    # evict it there, and renaming it would break the path its owner holds.
+    outside = tmp_path / "auth-1.log"
+    outside.write_text("x", encoding="utf-8")
+    assert gc._retain_failure_log(outside) == outside
+    assert outside.exists()
+
+
 def test_log_shows_quota_exhaustion(tmp_path: Path) -> None:
     quota = tmp_path / "q.log"
     _write_quota_log(quota)
@@ -2585,6 +2639,64 @@ def test_live_reads_repo_file(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.error
     assert "SECRET_MARKER_42" in result.output
+
+
+@pytest.mark.live
+@pytest.mark.skipif(not _live_gate(), reason=_LIVE_REASON)
+def test_live_read_outside_workspace_is_refused(tmp_path: Path) -> None:
+    # The $HOME read fence was proven by profile TEXT only
+    # (test_sandbox_profile_denies_writes_and_fences_home) until 2026-09-17: no
+    # live canary had ever watched a read outside cwd get refused, so under the
+    # detector rule the fence was an unproven positive. This is the refused
+    # read. The planted file sits in a sibling directory under $HOME -- the
+    # region `(deny file-read* (subpath <HOME>))` covers and cwd's allow does
+    # not -- because tmp_path itself lives outside $HOME, where allow-default
+    # applies and a read would legitimately succeed. Ground truth is the
+    # ABSENT CONTENT: the marker is random, so it can appear in the output
+    # only if the file was actually read. The same detector fires on the
+    # known positive: test_live_reads_repo_file sees its marker when the file
+    # is inside cwd. Model prose is corroboration only, never the proof.
+    import uuid
+
+    token = uuid.uuid4().hex
+    outside_dir = Path.home() / f"code-quorum-read-canary-{token[:8]}"
+    outside_dir.mkdir()
+    try:
+        target = outside_dir / "outside.txt"
+        marker = f"OUTSIDE_MARKER_{token}"
+        target.write_text(f"{marker}\n", encoding="utf-8")
+        result = asyncio.run(
+            gc.GeminiCliAgent().run(
+                prompt=(
+                    f"Read the file at {target} and reply with ONLY its first "
+                    "line. If the read fails, reply with READ_FAILED followed by "
+                    "the error text."
+                ),
+                cwd=str(tmp_path),
+            )
+        )
+    finally:
+        shutil.rmtree(outside_dir, ignore_errors=True)
+    assert marker not in result.output, (
+        f"the seat read {target} from outside cwd -- the $HOME read fence is "
+        f"open: {result.output[:300]}"
+    )
+    assert marker not in (result.error or "")
+    # Corroborate that agy ATTEMPTED and was DENIED (not merely skipped):
+    low = result.output.lower()
+    assert any(
+        s in low
+        for s in (
+            "read_failed",
+            "denied",
+            "permission",
+            "not allowed",
+            "cannot",
+            "blocked",
+            "failed",
+            "error",
+        )
+    ), f"no sign agy tried the read: {result.output[:300]}"
 
 
 @pytest.mark.live
