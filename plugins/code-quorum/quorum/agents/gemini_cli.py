@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 from ..model_config import (
@@ -92,6 +93,16 @@ def canonical_model(model: str) -> str:
 # the legacy Gemini CLI store; "antigravity-cli/settings.json" is the CLI config).
 AGY_SETTINGS_PATH = Path.home() / ".gemini" / "antigravity-cli" / "settings.json"
 AGY_OAUTH_PATH = Path.home() / ".gemini" / "oauth_creds.json"
+# The real agy state tree a private per-run home is seeded from (tests point
+# this at tmp_path so they never read the real login token).
+AGY_GEMINI_DIR = Path.home() / ".gemini"
+AGY_PRIVATE_HOME_PREFIX = "code-quorum-agy-home-"
+_AGY_TOKEN_NAME = "antigravity-oauth-token"
+# What agy needs to sign in and start (verified live on 1.2.10 with HOME moved
+# to a folder holding only these plus ~/.gemini/config). Everything else in
+# the shared tree -- conversations, brain, history.jsonl, summaries -- is other
+# runs' data and never enters a private home.
+_AGY_SEED_FILES = (_AGY_TOKEN_NAME, "settings.json", "installation_id")
 
 # Return codes. Distinct so a silent empty/failed turn reads as failed, not OK.
 GEMINI_CLI_NO_BINARY_RC = 127
@@ -122,12 +133,14 @@ GEMINI_CLI_RECORDED_MODEL_MISMATCH_RC = 5  # routing mismatch on a recorded choi
 # kills shell execution outright.
 #
 # This is a STRICTER contract than agy's denylist ever promised: no writes, no
-# shell, and no reads inside $HOME beyond the workspace under review plus the three
-# paths agy itself needs to function -- ~/.gemini (its own state + oauth), and, in
+# shell, and no reads in $HOME or the shared temp and volume roots beyond the
+# workspace under review plus the paths agy itself needs to function -- a
+# per-run private agy HOME seeded with only the login and config (so the shared
+# conversations, brain and history stay under the $HOME fence), and, in
 # ~/Library, its Playwright driver cache and the login keychain it reads for its
-# credential (see build_sandbox_profile for why each). Everything else in $HOME --
-# ~/.ssh, ~/.aws, ~/Library/Mail, Messages, other apps' tokens, every other repo --
-# is fenced off.
+# credential (see build_sandbox_profile for why each). Everything else --
+# ~/.ssh, ~/.aws, ~/Library/Mail, Messages, other apps' tokens, every other
+# repo, other runs' temp files, other agy conversations -- is fenced off.
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
 # Read-only tool sets, expressed in agy's permission-grant vocabulary. agy gates
@@ -210,7 +223,9 @@ REQUIRED_DENY = (
 # Gemini 3.7 Flash (High) override, Pro, and the Claude fallback. Re-verified
 # the same day after the Flash override moved to Gemini 3.8 Flash (High), and
 # again with the read-outside-workspace canary added (11 live checks).
-SEAT_VERIFIED_AGY_VERSION = "1.2.5"
+# 1.2.10 verified 2026-09-24: all 12 live checks passed with the widened read
+# fence and its $TMPDIR-sibling / $HOME-listing canary.
+SEAT_VERIFIED_AGY_VERSION = "1.2.10"
 
 
 def _sbpl(path: str | Path) -> str:
@@ -219,19 +234,158 @@ def _sbpl(path: str | Path) -> str:
     return f'"{escaped}"'
 
 
+def _fenced_read_roots(h: Path) -> list[Path]:
+    """Roots the profile denies reads under: $HOME and the shared places other
+    runs and users leave files. The per-user /var/folders tree is fenced whole:
+    $TMPDIR is its T/, and its C/ holds per-app caches."""
+    per_user = Path(tempfile.gettempdir()).resolve()
+    if per_user.name == "T":
+        per_user = per_user.parent
+    roots = [
+        Path("/Users"),
+        Path("/Volumes"),
+        Path("/private/tmp"),
+        Path("/private/var/tmp"),
+        per_user,
+        h,
+    ]
+    return list(dict.fromkeys(roots))
+
+
+def _cancels_a_fence(path: Path, h: Path) -> Path | None:
+    """The fenced root a recursive allow on `path` would re-open, if any."""
+    for root in _fenced_read_roots(h):
+        if root == path or path in root.parents:
+            return root
+    return None
+
+
+@dataclasses.dataclass
+class _PrivateAgyHome:
+    """A per-run HOME for agy. `token_seed` is the login token as copied in,
+    so retirement can tell a refresh by this run from one by another run."""
+
+    root: Path
+    token_seed: bytes | None
+
+
+def _stage_private_agy_home() -> _PrivateAgyHome:
+    """Create a private agy HOME seeded with only the login and config.
+
+    agy keeps every conversation, its prompt history and its summaries under
+    ~/.gemini/antigravity-cli and reads its own conversation back from there,
+    so no path rule can hide other runs' data from a seat (abrbandi,
+    2026-09-24). A run with its own HOME has no other runs' data to read."""
+    source = AGY_GEMINI_DIR
+    root = Path(tempfile.mkdtemp(prefix=AGY_PRIVATE_HOME_PREFIX)).resolve()
+    try:
+        state = root / ".gemini" / "antigravity-cli"
+        state.mkdir(parents=True)
+        token_seed: bytes | None = None
+        for name in _AGY_SEED_FILES:
+            try:
+                data = (source / "antigravity-cli" / name).read_bytes()
+            except FileNotFoundError:
+                continue
+            fd = os.open(state / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            if name == _AGY_TOKEN_NAME:
+                token_seed = data
+        if (source / "config").is_dir():
+            shutil.copytree(
+                source / "config", root / ".gemini" / "config", symlinks=True
+            )
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    return _PrivateAgyHome(root=root, token_seed=token_seed)
+
+
+def _write_token_atomically(real_token: Path, data: bytes) -> None:
+    fd, tmp = tempfile.mkstemp(dir=real_token.parent, prefix=".cq-token-")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, real_token)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _retire_private_agy_home(private: _PrivateAgyHome) -> None:
+    """Copy a token agy refreshed back to the real store, then delete the home.
+
+    The copy-back happens only when the real token still equals the seed: if
+    another run refreshed it first, that token is at least as new, so it
+    stays. Written temp-then-rename so a reader never sees a partial token."""
+    try:
+        try:
+            refreshed = (
+                private.root / ".gemini" / "antigravity-cli" / _AGY_TOKEN_NAME
+            ).read_bytes()
+        except OSError:
+            refreshed = b""
+        real_token = AGY_GEMINI_DIR / "antigravity-cli" / _AGY_TOKEN_NAME
+        if (
+            refreshed
+            and private.token_seed is not None
+            and refreshed != private.token_seed
+        ):
+            try:
+                current = real_token.read_bytes()
+            except OSError:
+                current = None
+            if current == private.token_seed:
+                # Best effort: this runs in run()'s finally, so a failed
+                # copy-back must not replace a finished seat result.
+                try:
+                    _write_token_atomically(real_token, refreshed)
+                except OSError as exc:
+                    logger.warning(
+                        "could not copy the refreshed agy token back: %s", exc
+                    )
+    finally:
+        shutil.rmtree(private.root, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def private_agy_home() -> Iterator[tuple[Path, dict[str, str]]]:
+    """A per-run private agy HOME for a direct agy launch outside the seat.
+
+    Yields (root, env): pass `agy_home=root` to build_sandbox_profile and run
+    agy under sandbox-exec with `env` (the seat's allowlisted env, HOME set to
+    root). Without both, agy reads the shared ~/.gemini/antigravity-cli store,
+    which holds every agy conversation on this machine. The home, including
+    its copy of the login token, is removed on exit."""
+    private = _stage_private_agy_home()
+    try:
+        env = allowlisted_seat_subprocess_env()
+        env["HOME"] = str(private.root)
+        yield private.root, env
+    finally:
+        _retire_private_agy_home(private)
+
+
 def check_sandbox_cwd(cwd: str, home: Path | None = None) -> str | None:
-    """Reject a cwd whose recursive read grant would contain all of HOME."""
+    """Reject a cwd whose recursive read grant would re-open a fenced root."""
     h = (home or Path.home()).resolve()
     cwd_p = Path(cwd).resolve()
-    try:
-        h.relative_to(cwd_p)
-    except ValueError:
-        return None
-    return (
-        f"cwd {cwd_p} is the home directory or one of its ancestors; granting "
-        "that recursive read would expose private home-directory files. Run "
-        "from the repository directory under an allowed project root."
-    )
+    if cwd_p == h or cwd_p in h.parents:
+        return (
+            f"cwd {cwd_p} is the home directory or one of its ancestors; granting "
+            "that recursive read would expose private home-directory files. Run "
+            "from the repository directory under an allowed project root."
+        )
+    root = _cancels_a_fence(cwd_p, h)
+    if root is not None:
+        return (
+            f"cwd {cwd_p} is or contains the fenced root {root}; granting that "
+            "recursive read would re-open it. Run from the repository directory."
+        )
+    return None
 
 
 def build_sandbox_profile(
@@ -239,6 +393,8 @@ def build_sandbox_profile(
     workspace: str | None = None,
     home: Path | None = None,
     binary_path: str | None = None,
+    extra_read_dirs: Sequence[str] = (),
+    agy_home: Path | None = None,
 ) -> str:
     """The seatbelt profile that enforces the council's read-only contract.
 
@@ -258,6 +414,19 @@ def build_sandbox_profile(
     Paths are RESOLVED: seatbelt matches the real path, so a cwd reached via a
     symlink (/tmp -> /private/tmp, /var -> /private/var) must be named by its
     target or the allow rule silently never matches.
+
+    Reads are also fenced OUTSIDE $HOME wherever other runs and users leave
+    files (_fenced_read_roots): /Users, /Volumes, /private/tmp, /private/var/tmp
+    and the per-user /var/folders tree that holds $TMPDIR. Under
+    allow-default alone, agy read a concurrent run's sealed review root and the
+    test suite's temp bundles from $TMPDIR (abrbandi, 2026-09-24). System paths
+    (dylibs, certs, tzdata) stay readable. `extra_read_dirs` re-allows a private
+    directory the seat stages for agy (the quota fallback's request file).
+
+    `agy_home` is the run's private HOME (_stage_private_agy_home). When set,
+    agy's state is allowed there instead of under the real ~/.gemini, whose
+    shared conversations and history then fall under the $HOME fence. The
+    seat's own --log-file stays in the real log dir: writable, not readable.
     """
     h = (home or Path.home()).resolve()
     cwd_p = Path(cwd).resolve()
@@ -277,10 +446,23 @@ def build_sandbox_profile(
     # would re-expose all of that for no functional gain. If agy relocates its driver
     # cache in a future version, the seat fails CLOSED (a visible sandbox denial at
     # spawn), never silently -- re-probe with fs_usage and adjust these two roots.
+    # Only agy's own trees under ~/.gemini (state, and config/projects, which it
+    # opens at start -- verified live on 1.2.5). The siblings hold Gemini CLI's
+    # chat history, tmp and oauth_creds.json, none of which agy reads.
+    state_home = agy_home.resolve() if agy_home is not None else h
     read_roots += [
-        h / ".gemini",
+        state_home / ".gemini" / "antigravity-cli",
+        state_home / ".gemini" / "config",
         h / "Library" / "Caches" / "ms-playwright-go",
     ]
+    for extra in extra_read_dirs:
+        extra_p = Path(extra).resolve()
+        root = _cancels_a_fence(extra_p, h)
+        if root is not None:
+            raise ValueError(
+                f"extra read dir {extra_p} is or contains the fenced root {root}"
+            )
+        read_roots.append(extra_p)
 
     # Dedupe, keep order stable so the profile is deterministic (and diffable).
     seen: dict[str, None] = {}
@@ -288,29 +470,34 @@ def build_sandbox_profile(
         seen.setdefault(str(root), None)
     allow_reads = "\n".join(f"  (subpath {_sbpl(r)})" for r in seen)
 
-    # Literal-only allows: the login keychain file plus its directory entries,
-    # and (when needed) the widened workspace root and ancestors between it and
-    # cwd. Directory literals permit traversal but not their children.
+    # Literal-only allows: the login keychain file, the agy binary, and (when
+    # needed) the widened workspace root and ancestors between it and cwd.
+    # Directories on the way to a file get METADATA only (stat, not readdir):
+    # a full literal read on a directory lets agy list it, which is how it
+    # listed $HOME through the binary's ancestors (abrbandi, 2026-09-24).
     ws = Path(workspace).resolve() if workspace else cwd_p
     keychains = h / "Library" / "Keychains"
-    literals: list[Path] = [
-        h / "Library",
-        keychains,
-        keychains / "login.keychain-db",
-    ]
+    literals: list[Path] = [keychains / "login.keychain-db"]
+    metadata_only: list[Path] = [h / "Library", keychains, h / ".gemini"]
+    if agy_home is not None:
+        # The seat's --log-file stays in the real log dir; agy stats the path
+        # down to it before writing, or it writes no log at all.
+        metadata_only += [
+            state_home,
+            state_home / ".gemini",
+            h / ".gemini" / "antigravity-cli",
+            h / ".gemini" / "antigravity-cli" / "log",
+        ]
     if binary_path:
         binary = Path(binary_path).resolve()
-        try:
-            binary.relative_to(h)
-        except ValueError:
-            pass  # outside HOME remains readable through allow-default
-        else:
+        # A binary under a fenced root (in $HOME, /Users/Shared, a volume)
+        # needs its own allow; anywhere else allow-default already covers it.
+        fence = next((r for r in _fenced_read_roots(h) if r in binary.parents), None)
+        if fence is not None:
             literals.append(binary)
             node = binary.parent
-            while True:
-                literals.append(node)
-                if node == h:
-                    break
+            while node != fence.parent:
+                metadata_only.append(node)
                 node = node.parent
     if ws != cwd_p and ws in cwd_p.parents:
         node = cwd_p.parent
@@ -321,13 +508,18 @@ def build_sandbox_profile(
             node = node.parent
     allow_literals = "".join(
         f"(allow file-read* (literal {_sbpl(p)}))\n" for p in literals
+    ) + "".join(
+        f"(allow file-read-metadata (literal {_sbpl(p)}))\n" for p in metadata_only
     )
+
+    deny_reads = "\n".join(f"  (subpath {_sbpl(r)})" for r in _fenced_read_roots(h))
 
     # Agy persists council transcripts and ephemeral coordination state, but it
     # must not be able to rewrite its executable/configuration surface. These
     # paths are the state written by observed council runs; settings.json is
     # repaired by Code Quorum before the sandbox starts and needs no write grant.
-    agy_root = h / ".gemini" / "antigravity-cli"
+    agy_root = state_home / ".gemini" / "antigravity-cli"
+    real_log_dir = h / ".gemini" / "antigravity-cli" / "log"
     writable_state = (
         "brain",
         "cache",
@@ -341,6 +533,8 @@ def build_sandbox_profile(
     allow_state_writes = "\n".join(
         f"  (subpath {_sbpl(agy_root / name)})" for name in writable_state
     )
+    if agy_home is not None:
+        allow_state_writes += f"\n  (subpath {_sbpl(real_log_dir)})"
     oauth_token = agy_root / "antigravity-oauth-token"
 
     return f"""(version 1)
@@ -359,15 +553,22 @@ def build_sandbox_profile(
   (literal "/dev/tty")
   (subpath "/dev/fd"))
 
-;; 2. No reads inside $HOME except the directory under review and agy's own
-;;    files. Fences off ~/.ssh, ~/.aws, and every other repo on the machine.
-;;    System paths (certs, dylibs, tzdata) stay readable via (allow default).
-(deny file-read* (subpath {_sbpl(h)}))
+;; 2. No reads in $HOME, other users' homes, volumes, or temp dirs except the
+;;    directory under review and agy's own files. Fences off ~/.ssh, ~/.aws,
+;;    every other repo, and other runs' temp files. System paths (certs,
+;;    dylibs, tzdata) stay readable via (allow default).
+(deny file-read*
+{deny_reads})
 (allow file-read*
 {allow_reads})
 ;;    Literal entries only (not directory contents): the login keychain plus any
-;;    widened --add-dir ancestors needed to traverse down to cwd.
-{allow_literals}"""
+;;    widened --add-dir ancestors needed to traverse down to cwd; the binary's
+;;    ancestors are stat-only.
+{allow_literals}
+;; 3. The log dir holds every run's log, code-quorum's kept logs included;
+;;    agy only writes its own (--log-file). Contents and listing are fenced.
+(deny file-read-data (subpath {_sbpl(real_log_dir)}))
+"""
 
 
 def _platform() -> str:
@@ -1223,21 +1424,39 @@ class GeminiCliAgent(Agent):
         if gate is not None:
             return gate
         assert binary_path is not None
-        profile = build_sandbox_profile(
-            cwd=cwd,
-            workspace=_non_hidden_workspace(cwd),
-            binary_path=binary_path,
-        )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            prefix="code-quorum-agy-auth-",
-            suffix=".sb",
-            delete=False,
-            encoding="utf-8",
-        ) as fh:
-            fh.write(profile)
-            profile_path = fh.name
         try:
+            # Synchronous on purpose (a few small files): a cancel during an
+            # awaited stage would orphan the home, and its token copy, before
+            # any cleanup is armed.
+            private_home = _stage_private_agy_home()
+        except OSError as exc:
+            return AgentResult(
+                agent=self.name,
+                output="",
+                error=f"could not stage a private agy home: {exc}",
+                returncode=1,
+                duration_s=time.monotonic() - start,
+                unavailable_reason="preflight",
+            )
+        profile_path: str | None = None
+        try:
+            profile = build_sandbox_profile(
+                cwd=cwd,
+                workspace=_non_hidden_workspace(cwd),
+                binary_path=binary_path,
+                agy_home=private_home.root,
+            )
+            with tempfile.NamedTemporaryFile(
+                "w",
+                prefix="code-quorum-agy-auth-",
+                suffix=".sb",
+                delete=False,
+                encoding="utf-8",
+            ) as fh:
+                fh.write(profile)
+                profile_path = fh.name
+            env = allowlisted_seat_subprocess_env()
+            env["HOME"] = str(private_home.root)
             try:
                 proc = await asyncio.create_subprocess_exec(
                     SANDBOX_EXEC,
@@ -1246,7 +1465,7 @@ class GeminiCliAgent(Agent):
                     self.binary,
                     "models",
                     cwd=cwd,
-                    env=allowlisted_seat_subprocess_env(),
+                    env=env,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -1330,8 +1549,10 @@ class GeminiCliAgent(Agent):
                 duration_s=time.monotonic() - start,
             )
         finally:
-            with contextlib.suppress(OSError):
-                os.unlink(profile_path)
+            if profile_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(profile_path)
+            await asyncio.to_thread(_retire_private_agy_home, private_home)
 
     async def run(self, prompt: str, cwd: str) -> AgentResult:
         start = time.monotonic()
@@ -1396,22 +1617,47 @@ class GeminiCliAgent(Agent):
             return gate
         assert binary_path is not None
 
+        # agy gets a private HOME for this run, so the shared conversation
+        # store and prompt history are never in reach (_stage_private_agy_home).
+        try:
+            # Synchronous on purpose (a few small files): a cancel during an
+            # awaited stage would orphan the home, and its token copy, before
+            # any cleanup is armed.
+            private_home = _stage_private_agy_home()
+        except OSError as exc:
+            result = AgentResult(
+                agent=self.name,
+                output="",
+                error=f"could not stage a private agy home: {exc}",
+                returncode=1,
+                duration_s=time.monotonic() - start,
+                unavailable_reason="preflight",
+            )
+            _apply_version_warning(result, version_warn)
+            return result
+        agy_home = private_home.root
+
         # sandbox-exec reads the profile at exec time, so it must be a real file
         # that outlives the spawn. Removed once agy has exited (or failed to).
-        profile = build_sandbox_profile(
-            cwd=cwd,
-            workspace=_non_hidden_workspace(cwd),  # literal-only allow, see builder
-            binary_path=binary_path,
-        )
-        with tempfile.NamedTemporaryFile(
-            "w",
-            prefix="code-quorum-agy-",
-            suffix=".sb",
-            delete=False,
-            encoding="utf-8",
-        ) as fh:
-            fh.write(profile)
-            profile_path = fh.name
+        try:
+            profile = build_sandbox_profile(
+                cwd=cwd,
+                workspace=_non_hidden_workspace(cwd),  # literal-only allow
+                binary_path=binary_path,
+                agy_home=agy_home,
+            )
+            with tempfile.NamedTemporaryFile(
+                "w",
+                prefix="code-quorum-agy-",
+                suffix=".sb",
+                delete=False,
+                encoding="utf-8",
+            ) as fh:
+                fh.write(profile)
+                profile_path = fh.name
+        except BaseException:
+            await asyncio.to_thread(_retire_private_agy_home, private_home)
+            raise
         run_logs: list[Path] = []
         keep_logs: set[Path] = set()
         kept_paths: list[Path] = []
@@ -1447,6 +1693,7 @@ class GeminiCliAgent(Agent):
                 profile_path,
                 start,
                 log_file=str(active_log) if active_log is not None else None,
+                agy_home=agy_home,
             )
             attempt_s = time.monotonic() - attempt_start
             retry_initial_log: Path | None = None
@@ -1471,6 +1718,7 @@ class GeminiCliAgent(Agent):
                     profile_path,
                     start,
                     log_file=str(active_log) if active_log is not None else None,
+                    agy_home=agy_home,
                 )
                 if retry_initial_log is not None and (
                     result.returncode != 0 or active_log is None
@@ -1507,6 +1755,7 @@ class GeminiCliAgent(Agent):
                     profile_path,
                     start,
                     log_file=str(active_log) if active_log is not None else None,
+                    agy_home=agy_home,
                 )
                 if auth_retry_initial_log is not None and (
                     result.returncode != 0 or active_log is None
@@ -1555,15 +1804,38 @@ class GeminiCliAgent(Agent):
                     fallback_prompt,
                     request_path,
                 ):
-                    result = await self._spawn_and_collect(
-                        fallback_prompt,
-                        cwd,
-                        profile_path,
-                        start,
-                        log_file=str(active_log) if active_log is not None else None,
-                        model=AGY_QUOTA_FALLBACK_MODEL,
-                        extra_add_dir=str(request_path.parent),
+                    # /private/tmp is read-fenced, so this attempt gets its own
+                    # profile re-allowing only the staged request directory.
+                    # Built before the file exists, so a builder error leaks
+                    # nothing.
+                    fallback_profile = build_sandbox_profile(
+                        cwd=cwd,
+                        workspace=_non_hidden_workspace(cwd),
+                        binary_path=binary_path,
+                        extra_read_dirs=[str(request_path.parent)],
+                        agy_home=agy_home,
                     )
+                    fd, fallback_profile_path = tempfile.mkstemp(
+                        prefix="code-quorum-agy-fallback-", suffix=".sb"
+                    )
+                    try:
+                        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                            fh.write(fallback_profile)
+                        result = await self._spawn_and_collect(
+                            fallback_prompt,
+                            cwd,
+                            fallback_profile_path,
+                            start,
+                            log_file=(
+                                str(active_log) if active_log is not None else None
+                            ),
+                            model=AGY_QUOTA_FALLBACK_MODEL,
+                            extra_add_dir=str(request_path.parent),
+                            agy_home=agy_home,
+                        )
+                    finally:
+                        with contextlib.suppress(OSError):
+                            os.unlink(fallback_profile_path)
                 # Stamp the model that actually answered as soon as the
                 # fallback is SELECTED (error paths included) -- run_council
                 # preserves a seat-set model, so the transcript roster names
@@ -1709,6 +1981,7 @@ class GeminiCliAgent(Agent):
                 if run_log not in keep_logs:
                     with contextlib.suppress(OSError):
                         os.unlink(run_log)
+            await asyncio.to_thread(_retire_private_agy_home, private_home)
 
     async def _spawn_and_collect(
         self,
@@ -1719,7 +1992,11 @@ class GeminiCliAgent(Agent):
         log_file: str | None = None,
         model: str | None = None,
         extra_add_dir: str | None = None,
+        agy_home: Path | None = None,
     ) -> AgentResult:
+        env = allowlisted_seat_subprocess_env()
+        if agy_home is not None:
+            env["HOME"] = str(agy_home)
         cmd = self.build_command(
             prompt=prompt,
             cwd=cwd,
@@ -1732,7 +2009,7 @@ class GeminiCliAgent(Agent):
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=cwd,  # anchor relative paths in the caller's cwd
-                env=allowlisted_seat_subprocess_env(),
+                env=env,
                 stdin=asyncio.subprocess.DEVNULL,  # quorum-mcp fd 0 is JSON-RPC
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

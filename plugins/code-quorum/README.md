@@ -166,9 +166,9 @@ applied. Enforcement differs by seat: Codex uses its native read-only sandbox,
 Claude exposes only read tools, Gemini uses macOS Seatbelt, and OpenCode uses an
 isolated HOME with restricted permissions.
 
-Gemini's Seatbelt profile denies other home-directory reads, with explicit
-exceptions for agy authentication and runtime state. It does not deny readable
-paths outside `$HOME`. Code Quorum provides no universal path fence for Claude,
+Gemini's Seatbelt profile denies reads of home, volume, and temp directories
+outside `cwd`, except agy's own authentication and state. System paths stay
+readable. Code Quorum provides no universal path fence for Claude,
 Codex, or OpenCode. Council material can leave the machine under the user's
 configured provider accounts. The full boundary table, data-egress map,
 strict-isolation guidance, and credential handling are in

@@ -159,9 +159,18 @@ bounds the prepared diff only; it does not restrict the external seats'
 read-only access to `cwd`.
 
 Code Quorum does not enforce universal `cwd` read confinement. The Claude,
-Codex, and OpenCode seats have no Code Quorum path fence. Gemini denies other
-reads inside `$HOME` except its explicit agy/keychain/cache requirements, but its
-Seatbelt profile leaves otherwise-readable paths outside `$HOME` available.
+Codex, and OpenCode seats have no Code Quorum path fence. Gemini's Seatbelt
+profile denies reads under `/Users` (including `$HOME`), `/Volumes`,
+`/private/tmp`, `/private/var/tmp`, and the per-user `/private/var/folders`
+tree that holds `$TMPDIR`, except `cwd` and its explicit agy/keychain/cache
+requirements. System paths such as `/System`, `/usr`, `/Library`, and `/opt`
+stay readable. Each Gemini run starts agy with a private HOME, an owner-only
+folder under `$TMPDIR` that holds only a copy of the agy login, settings, and
+`~/.gemini/config`. The shared agy store under `~/.gemini/antigravity-cli`
+(every conversation, history, and summary on the machine) is then under the
+`$HOME` fence and unreadable to the seat. The private HOME is deleted when the
+run ends; a refreshed login token is copied back only when the shared token
+did not change during the run.
 `CODE_QUORUM_HELPER_ALLOWED_ROOTS` controls which working directories every MCP
 workflow accepts, not which paths a running seat may read. A separate clean clone
 reduces accidental exposure from normal relative reads, but it is not a security
