@@ -97,6 +97,8 @@ AGY_OAUTH_PATH = Path.home() / ".gemini" / "oauth_creds.json"
 # this at tmp_path so they never read the real login token).
 AGY_GEMINI_DIR = Path.home() / ".gemini"
 AGY_PRIVATE_HOME_PREFIX = "code-quorum-agy-home-"
+# macOS finds the default keychain under $HOME, so a private home links to it.
+LOGIN_KEYCHAIN = Path.home() / "Library" / "Keychains" / "login.keychain-db"
 _AGY_TOKEN_NAME = "antigravity-oauth-token"
 # What agy needs to sign in and start (verified live on 1.2.10 with HOME moved
 # to a folder holding only these plus ~/.gemini/config). Everything else in
@@ -225,7 +227,9 @@ REQUIRED_DENY = (
 # again with the read-outside-workspace canary added (11 live checks).
 # 1.2.10 verified 2026-09-24: all 12 live checks passed with the widened read
 # fence and its $TMPDIR-sibling / $HOME-listing canary.
-SEAT_VERIFIED_AGY_VERSION = "1.2.10"
+# 1.2.14 verified 2026-10-01: all 13 live checks passed with the private
+# HOME's login-keychain link.
+SEAT_VERIFIED_AGY_VERSION = "1.2.14"
 
 
 def _sbpl(path: str | Path) -> str:
@@ -295,6 +299,20 @@ def _stage_private_agy_home() -> _PrivateAgyHome:
         if (source / "config").is_dir():
             shutil.copytree(
                 source / "config", root / ".gemini" / "config", symlinks=True
+            )
+        # Without a keychain under HOME, agy's token save makes macOS show a
+        # "Keychain Not Found" dialog that offers "Reset To Defaults" (S,
+        # 2026-10-01). The link adds no access: the profile already allows
+        # reading this one file.
+        if LOGIN_KEYCHAIN.is_file():
+            keychains = root / "Library" / "Keychains"
+            keychains.mkdir(parents=True)
+            (keychains / LOGIN_KEYCHAIN.name).symlink_to(LOGIN_KEYCHAIN)
+        else:
+            logger.warning(
+                "no login keychain at %s; macOS may show a 'Keychain Not Found' "
+                "dialog during this agy run. Click Cancel, never Reset To Defaults.",
+                LOGIN_KEYCHAIN,
             )
     except BaseException:
         shutil.rmtree(root, ignore_errors=True)
@@ -487,7 +505,11 @@ def build_sandbox_profile(
             state_home / ".gemini",
             h / ".gemini" / "antigravity-cli",
             h / ".gemini" / "antigravity-cli" / "log",
+            state_home / "Library",
+            state_home / "Library" / "Keychains",
         ]
+        # The private home's link to the login keychain (_stage_private_agy_home).
+        literals.append(state_home / "Library" / "Keychains" / "login.keychain-db")
     if binary_path:
         binary = Path(binary_path).resolve()
         # A binary under a fenced root (in $HOME, /Users/Shared, a volume)

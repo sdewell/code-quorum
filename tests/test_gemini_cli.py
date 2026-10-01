@@ -15,6 +15,11 @@ def _hermetic_agy_state(request, monkeypatch, tmp_path):
     # holds the real login token. Non-live tests must never read it.
     if request.node.get_closest_marker("live") is None:
         monkeypatch.setattr(_gc, "AGY_GEMINI_DIR", tmp_path / "real-gemini")
+        monkeypatch.setattr(
+            _gc,
+            "LOGIN_KEYCHAIN",
+            tmp_path / "home" / "Library" / "Keychains" / "login.keychain-db",
+        )
 
 
 # The 6 permission ACTIONS agy actually gates -- re-verified live against 1.1.2 by
@@ -722,6 +727,53 @@ def test_sandbox_profile_with_private_home_fences_shared_agy_state(
     shared = home / ".gemini" / "antigravity-cli"
     assert "OTHER_CONVO" not in cat(shared / "conversations" / "other.db")
     assert "OTHER_HISTORY" not in cat(shared / "history.jsonl")
+
+
+@pytest.mark.skipif(not Path(gc.SANDBOX_EXEC).exists(), reason="needs macOS seatbelt")
+def test_private_agy_home_reaches_the_login_keychain(tmp_path: Path) -> None:
+    # macOS finds the default keychain under $HOME. With HOME moved to the
+    # private home and no keychain there, agy's token save raised a "Keychain
+    # Not Found" dialog offering "Reset To Defaults" (S, 2026-10-01).
+    home = tmp_path / "home"
+    gc.LOGIN_KEYCHAIN.parent.mkdir(parents=True)
+    gc.LOGIN_KEYCHAIN.write_text("KEYCHAIN")
+    _fake_agy_state(tmp_path / "real-gemini")
+    private = gc._stage_private_agy_home()
+    try:
+        link = private.root / "Library" / "Keychains" / "login.keychain-db"
+        assert link.resolve() == gc.LOGIN_KEYCHAIN.resolve()
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        profile = tmp_path / "p.sb"
+        profile.write_text(
+            gc.build_sandbox_profile(cwd=str(ws), home=home, agy_home=private.root),
+            encoding="utf-8",
+        )
+        out = subprocess.run(
+            [gc.SANDBOX_EXEC, "-f", str(profile), "/bin/cat", str(link)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert out.stdout == "KEYCHAIN", out.stderr
+    finally:
+        gc._retire_private_agy_home(private)
+    assert gc.LOGIN_KEYCHAIN.read_text() == "KEYCHAIN"
+
+
+def test_private_agy_home_warns_instead_of_linking_a_missing_keychain(
+    tmp_path: Path, caplog
+) -> None:
+    # q-review: a dangling link brings the dialog back with no signal.
+    _fake_agy_state(tmp_path / "real-gemini")
+    with caplog.at_level(logging.WARNING):
+        private = gc._stage_private_agy_home()
+    try:
+        link = private.root / "Library" / "Keychains" / "login.keychain-db"
+        assert not link.is_symlink()
+        assert "login keychain" in caplog.text
+    finally:
+        gc._retire_private_agy_home(private)
 
 
 def test_run_spawns_agy_with_a_private_home_and_removes_it(

@@ -166,7 +166,10 @@ tree that holds `$TMPDIR`, except `cwd` and its explicit agy/keychain/cache
 requirements. System paths such as `/System`, `/usr`, `/Library`, and `/opt`
 stay readable. Each Gemini run starts agy with a private HOME, an owner-only
 folder under `$TMPDIR` that holds only a copy of the agy login, settings, and
-`~/.gemini/config`. The shared agy store under `~/.gemini/antigravity-cli`
+`~/.gemini/config`, plus a link to the login keychain. macOS looks for the
+default keychain under `$HOME`; without the link it shows a "Keychain Not
+Found" dialog that offers to reset the keychains. The link gives no new
+access, because the profile already allows reads of that one file. The shared agy store under `~/.gemini/antigravity-cli`
 (every conversation, history, and summary on the machine) is then under the
 `$HOME` fence and unreadable to the seat. The private HOME is deleted when the
 run ends; a refreshed login token is copied back only when the shared token
