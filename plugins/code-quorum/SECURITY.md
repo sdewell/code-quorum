@@ -154,7 +154,13 @@ rejects an omitted or blank value before a job is created. The MCP server's own
 plugin-cache or runtime directory is never used as project context. The selected
 directory must be under `CODE_QUORUM_HELPER_ALLOWED_ROOTS` (`~/Code`, `~/src`,
 and `~/.codex/agent-worktrees` — a common agent-worktree location — by
-default).
+default), or be a linked git worktree of a repository under one of those
+roots. The repository is the git directory that git reports for that
+directory (`git rev-parse --git-common-dir`), queried with no `GIT_*`
+variables in the environment. For a `--separate-git-dir` checkout git records
+no path back to the checkout, so the git directory is the anchor. A directory
+that is not a linked worktree of such a repository is refused as before, and
+so is a machine without git.
 Plan and scope documents must resolve inside that `cwd`; absolute
 paths, `..` escapes, and symlink escapes are rejected before their contents are
 read. Because a `cwd` under `~/.codex/agent-worktrees` is hidden, the Gemini

@@ -103,6 +103,96 @@ def _path_env(uv_binary: Path, seat_binaries: tuple[Path, ...]) -> str:
     return os.pathsep.join(dict.fromkeys(part for part in candidates if part))
 
 
+def _under_any(path: Path, roots: tuple[Path, ...]) -> bool:
+    for root in roots:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _git_binary() -> str | None:
+    # The helper's launchd PATH is assembled at install time; /usr/bin/git is
+    # the one location macOS guarantees when the user's PATH lacks git.
+    found = shutil.which("git")
+    if found:
+        return found
+    fallback = Path("/usr/bin/git")
+    return str(fallback) if fallback.is_file() else None
+
+
+_GIT_QUERY_TIMEOUT_S = 10
+
+
+def _git_query_env() -> dict[str, str]:
+    # GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR override `git -C <path>`
+    # discovery: an exported GIT_DIR naming an allowed repository would make
+    # every directory look like one of its worktrees. The query sees none of
+    # git's environment.
+    return {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+
+
+def _git_query(git: str, path: Path, *args: str) -> str | None:
+    """stdout of `git -C <path> <args>`, or None on any failure."""
+    try:
+        proc = subprocess.run(
+            [git, "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=_GIT_QUERY_TIMEOUT_S,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            env=_git_query_env(),
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def linked_worktree_repo(path: Path) -> Path | None:
+    """The git directory of the repository that the linked worktree at `path`
+    belongs to (resolved), or None when `path` is not a linked worktree: a
+    main checkout or any directory inside it, a bare repository, no
+    repository, or no git.
+
+    A linked worktree is one whose `--git-dir` (its slot under
+    `<common>/worktrees/`) differs from its `--git-common-dir`. The common
+    directory is the repository: for an ordinary checkout it is `<checkout>/.git`,
+    and for a `--separate-git-dir` checkout it is wherever that flag put it. Git
+    records no checkout path for the latter (`git worktree list` names the git
+    directory's parent), so the git directory is the only anchor git can
+    vouch for."""
+    git = _git_binary()
+    if git is None:
+        return None
+    dirs = _git_query(
+        git,
+        path,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+    )
+    if dirs is None:
+        return None
+    lines = [line.strip() for line in dirs.splitlines() if line.strip()]
+    if len(lines) != 2:
+        return None
+    try:
+        git_dir = Path(lines[0]).resolve()
+        common = Path(lines[1]).resolve()
+    except OSError:
+        return None
+    return None if git_dir == common else common
+
+
 def cwd_allowed_error(cwd: str, roots: tuple[Path, ...]) -> str | None:
     try:
         path = Path(cwd).expanduser().resolve()
@@ -110,15 +200,18 @@ def cwd_allowed_error(cwd: str, roots: tuple[Path, ...]) -> str | None:
         return f"requested cwd cannot be resolved: {exc}"
     if not path.is_dir():
         return f"requested cwd is not a directory: {path}"
-    for root in roots:
-        try:
-            path.relative_to(root)
-        except ValueError:
-            continue
+    if _under_any(path, roots):
+        return None
+    # A linked worktree is the repository it belongs to, wherever the user's
+    # tooling placed it (git itself, Worktrunk, an IDE); naming the worktree
+    # location as a root rots the day that location moves.
+    repo = linked_worktree_repo(path)
+    if repo is not None and _under_any(repo, roots):
         return None
     allowed = ", ".join(str(root) for root in roots)
+    where = f"{path} (a worktree of {repo}, also outside)" if repo else str(path)
     return (
-        f"requested cwd is outside allowed roots ({allowed}): {path}. Set "
+        f"requested cwd is outside allowed roots ({allowed}): {where}. Set "
         f"{_ALLOWED_ROOTS_ENV} before starting the host; on Codex, reinstall "
         "the seat helper with --allowed-root as well."
     )

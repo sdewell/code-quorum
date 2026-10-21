@@ -150,12 +150,12 @@ uv run quorum seat-helper-status
 uv run quorum auth-check --seat gemini --host codex
 ```
 
-Every MCP workflow permits `cwd` under `~/Code`/`~/src`/`~/.codex/agent-worktrees`
-(a common agent-worktree location); the Codex helper applies the same roots
-before accepting Claude or Gemini requests.
-Set `CODE_QUORUM_HELPER_ALLOWED_ROOTS` or install the helper with repeated
-`--allowed-root` options to use other project roots. Reinstall it from the
-updated stable checkout after every Code Quorum upgrade. Incompatible helper
+Every MCP workflow permits `cwd` under `~/Code`/`~/src`/`~/.codex/agent-worktrees`,
+or in a git worktree of a repository under one; the Codex helper applies the
+same rule before accepting Claude or Gemini requests.
+Set `CODE_QUORUM_HELPER_ALLOWED_ROOTS` or install the helper with
+`--allowed-root` options to use other roots. Reinstall it from the
+stable checkout after every Code Quorum upgrade. Incompatible helper
 protocols fail closed, and installation from Codex's replaceable plugin cache
 is rejected.
 

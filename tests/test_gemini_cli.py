@@ -1220,27 +1220,36 @@ def test_run_cancelled_during_staging_leaves_no_private_home(
     # A private home holds a copy of the login token; a run cancelled while it
     # is staged must not leave it behind.
     import time
+    from concurrent.futures import ThreadPoolExecutor
 
     _fake_agy_state(tmp_path / "real-gemini")
     _patch_run_seams_sequenced(monkeypatch, [(0, b"answer", b"")], tmp_path)
     _patch_run_logs(monkeypatch, tmp_path, quota_attempts=set())
     staged: list[Path] = []
+    busy: list[asyncio.Future[None]] = []
     real_stage = gc._stage_private_agy_home
 
     def _slow_stage():
         time.sleep(0.2)
         private = real_stage()
         staged.append(private.root)
+        # From here the one executor worker is busy: whatever run() hands to
+        # it after staging is still queued when the cancel lands, and a queued
+        # work item that is cancelled never runs (Linux CI, run 39684391484).
+        loop = asyncio.get_running_loop()
+        busy.append(loop.run_in_executor(None, time.sleep, 0.3))
         return private
 
     monkeypatch.setattr(gc, "_stage_private_agy_home", _slow_stage)
 
     async def _cancel_mid_stage() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         task = asyncio.create_task(gc.GeminiCliAgent().run(prompt="x", cwd="/r"))
         await asyncio.sleep(0.05)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        await asyncio.sleep(0.4)
+        await asyncio.gather(*busy)
 
     asyncio.run(_cancel_mid_stage())
     assert len(staged) == 1

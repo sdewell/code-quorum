@@ -346,7 +346,13 @@ def _retire_private_agy_home(private: _PrivateAgyHome) -> None:
 
     The copy-back happens only when the real token still equals the seed: if
     another run refreshed it first, that token is at least as new, so it
-    stays. Written temp-then-rename so a reader never sees a partial token."""
+    stays. Written temp-then-rename so a reader never sees a partial token.
+
+    Call it synchronously from a coroutine's cleanup, like the stage. Awaited
+    through asyncio.to_thread, a cancel that lands while the work item is
+    still queued cancels the item and it never runs: the home, with its token
+    copy, survived on the Linux CI runner (run 39684391484, 2026-10-21). A few
+    small files; blocking the loop costs milliseconds."""
     try:
         try:
             refreshed = (
@@ -1587,7 +1593,7 @@ class GeminiCliAgent(Agent):
             if profile_path is not None:
                 with contextlib.suppress(OSError):
                     os.unlink(profile_path)
-            await asyncio.to_thread(_retire_private_agy_home, private_home)
+            _retire_private_agy_home(private_home)
 
     async def run(self, prompt: str, cwd: str) -> AgentResult:
         start = time.monotonic()
@@ -1691,7 +1697,7 @@ class GeminiCliAgent(Agent):
                 fh.write(profile)
                 profile_path = fh.name
         except BaseException:
-            await asyncio.to_thread(_retire_private_agy_home, private_home)
+            _retire_private_agy_home(private_home)
             raise
         run_logs: list[Path] = []
         keep_logs: set[Path] = set()
@@ -2016,7 +2022,7 @@ class GeminiCliAgent(Agent):
                 if run_log not in keep_logs:
                     with contextlib.suppress(OSError):
                         os.unlink(run_log)
-            await asyncio.to_thread(_retire_private_agy_home, private_home)
+            _retire_private_agy_home(private_home)
 
     async def _spawn_and_collect(
         self,

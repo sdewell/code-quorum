@@ -1,6 +1,7 @@
 import asyncio
 import os
 import plistlib
+import subprocess
 import time
 from pathlib import Path
 
@@ -162,6 +163,123 @@ def test_default_allowed_roots_env_override_replaces_defaults(
     monkeypatch.setenv(sh._ALLOWED_ROOTS_ENV, str(only_root))
 
     assert sh.default_allowed_roots() == (only_root.resolve(),)
+
+
+def _git(*args: str, cwd: Path) -> None:
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    subprocess.run(
+        ["git", *args], cwd=cwd, env=env, check=True, capture_output=True, text=True
+    )
+
+
+def _repo_with_linked_worktree(main: Path, worktree: Path) -> None:
+    """A real repository at `main` with a linked worktree at `worktree`."""
+    main.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=main)
+    _git("commit", "-q", "--allow-empty", "-m", "root", cwd=main)
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    _git("worktree", "add", "-q", "-b", "task", str(worktree), cwd=main)
+
+
+def test_cwd_allowed_error_permits_linked_worktree_of_repo_under_root(
+    tmp_path: Path,
+) -> None:
+    # Worktrees land wherever the user's tooling puts them (Worktrunk's
+    # ~/.agent-worktrees, a sibling directory, ...). A worktree whose main
+    # checkout is under an allowed root IS that repository, so it is allowed
+    # without the roots naming the worktree location.
+    root = tmp_path / "Code"
+    worktree = tmp_path / "elsewhere" / "repo" / "task"
+    _repo_with_linked_worktree(root / "repo", worktree)
+
+    assert sh.cwd_allowed_error(str(worktree), (root.resolve(),)) is None
+
+
+def test_cwd_allowed_error_rejects_linked_worktree_of_repo_outside_roots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "Code"
+    root.mkdir()
+    worktree = tmp_path / "elsewhere" / "repo" / "task"
+    _repo_with_linked_worktree(tmp_path / "outside" / "repo", worktree)
+
+    error = sh.cwd_allowed_error(str(worktree), (root.resolve(),))
+
+    assert error is not None
+    assert "outside allowed roots" in error
+
+
+def test_cwd_allowed_error_rejects_main_checkout_outside_roots(
+    tmp_path: Path,
+) -> None:
+    # The worktree rule widens nothing for a repository's own checkout: a main
+    # checkout outside the roots is refused exactly as a plain directory is.
+    root = tmp_path / "Code"
+    root.mkdir()
+    main = tmp_path / "outside" / "repo"
+    _repo_with_linked_worktree(main, tmp_path / "elsewhere" / "task")
+
+    error = sh.cwd_allowed_error(str(main), (root.resolve(),))
+
+    assert error is not None
+    assert "outside allowed roots" in error
+    assert "a worktree of" not in error
+
+
+def test_cwd_allowed_error_ignores_ambient_git_dir(monkeypatch, tmp_path: Path) -> None:
+    # GIT_DIR overrides `git -C <path>` discovery. Exported by hooks and
+    # tooling, it would make every directory look like a worktree of that
+    # repository, and the gate would admit anything.
+    root = tmp_path / "Code"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _repo_with_linked_worktree(root / "repo", tmp_path / "elsewhere" / "task")
+    monkeypatch.setenv("GIT_DIR", str(root / "repo" / ".git" / "worktrees" / "task"))
+
+    error = sh.cwd_allowed_error(str(outside), (root.resolve(),))
+
+    assert error is not None
+    assert "outside allowed roots" in error
+
+
+def test_cwd_allowed_error_judges_a_separate_git_dir_by_the_git_dir(
+    tmp_path: Path,
+) -> None:
+    # `--separate-git-dir` puts the git directory anywhere, and git records
+    # no path back to the checkout. The gate follows the git directory, which
+    # is the only anchor git can vouch for, and the refusal names it.
+    root = tmp_path / "Code"
+    checkout_inside = root / "repo"
+    checkout_inside.mkdir(parents=True)
+    store_outside = tmp_path / "outside" / "store.git"
+    store_outside.parent.mkdir()
+    _git(
+        "init",
+        "-q",
+        "-b",
+        "main",
+        "--separate-git-dir",
+        str(store_outside),
+        cwd=checkout_inside,
+    )
+    _git("commit", "-q", "--allow-empty", "-m", "root", cwd=checkout_inside)
+    worktree = tmp_path / "elsewhere" / "task"
+    worktree.parent.mkdir(parents=True)
+    _git("worktree", "add", "-q", "-b", "task", str(worktree), cwd=checkout_inside)
+
+    error = sh.cwd_allowed_error(str(worktree), (root.resolve(),))
+
+    assert error is not None
+    assert "outside allowed roots" in error
+    assert f"a worktree of {store_outside.resolve()}" in error
 
 
 def test_helper_v1_is_rejected_after_auth_check_operation_was_added(
