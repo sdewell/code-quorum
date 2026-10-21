@@ -213,6 +213,193 @@ async def test_search_arxiv_non_feed_200_without_the_marker_is_not_rate():
             await search_arxiv(client, "diffusion", limit=5, timeout=5.0)
 
 
+def _openalex_arxiv_work(title, arxiv_id):
+    return {
+        "title": title,
+        "publication_year": 2018,
+        "doi": f"https://doi.org/10.48550/arxiv.{arxiv_id}",
+        "authorships": [{"author": {"display_name": "Nuno Preguiça"}}],
+        "abstract_inverted_index": {"CRDTs": [0], "converge": [1]},
+        "primary_location": {"landing_page_url": f"http://arxiv.org/abs/{arxiv_id}"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_arxiv_406_falls_back_to_openalex_arxiv_index():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(406)
+        assert request.url.params["filter"] == "primary_location.source.id:S4306400194"
+        assert request.url.params["search"] == "conflict-free replicated data types"
+        return httpx.Response(
+            200,
+            json={
+                "results": [_openalex_arxiv_work("CRDTs: An Overview", "1806.10254")]
+            },
+        )
+
+    async with _client(handler) as client:
+        papers = await search_arxiv(
+            client, "conflict-free replicated data types", limit=5, timeout=5.0
+        )
+
+    assert seen == ["export.arxiv.org", "api.openalex.org"]
+    [paper] = papers
+    assert paper.identifier == "1806.10254"
+    assert paper.url == "https://arxiv.org/abs/1806.10254"
+    assert paper.source == paper.research_source == "arxiv"
+    assert paper.abstract == "CRDTs converge"
+    assert paper.strata == ("via OpenAlex",)
+    assert "HTTP 406" in getattr(papers, "note", "")
+
+
+@pytest.mark.asyncio
+async def test_arxiv_refusal_is_remembered_so_later_calls_skip_export_api():
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.host)
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(406)
+        return httpx.Response(
+            200, json={"results": [_openalex_arxiv_work("CRDTs", "1806.10254")]}
+        )
+
+    async with _client(handler) as client:
+        await search_arxiv(client, "crdt merge", limit=5, timeout=5.0)
+        second = await search_arxiv(client, "crdt merge", limit=5, timeout=5.0)
+
+    assert seen == ["export.arxiv.org", "api.openalex.org", "api.openalex.org"]
+    assert "refused this machine" in getattr(second, "note", "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fallback", "expected_class", "expected_code", "hint_phrase"),
+    [
+        (httpx.Response(409), "config", "CONFIG", "do not retry arXiv"),
+        (httpx.Response(429), "rate", "INFRASTRUCTURE", "rate-limited"),
+        (
+            httpx.Response(200, json={"results": None}),
+            "transient",
+            "INFRASTRUCTURE",
+            "retry the same query once",
+        ),
+    ],
+    ids=["refused", "rate-limited", "no-results-list"],
+)
+async def test_arxiv_refusal_with_failed_fallback_follows_the_fallback_cause(
+    monkeypatch, fallback, expected_class, expected_code, hint_phrase
+):
+    """When export.arxiv.org refuses the host and the OpenAlex fallback fails
+    too, the class and the hint follow the fallback's cause, and agree: a
+    refusal (409) is CONFIG with 'do not retry'; a 429 is rate; a transient
+    failure (here a 200 whose results list is null, which once raised a
+    TypeError outside the fallback's guard) is retried once, then reported."""
+    import quorum.research as research_mod
+
+    monkeypatch.setattr(research_mod, "_RATE_PAUSE_S", 0.0)
+    monkeypatch.setattr(research_mod, "_TRANSIENT_RETRY_DELAY_S", 0.0)
+
+    def handler(request):
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(406)
+        return fallback
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "conflict-free replicated data types",
+            sources={"arxiv"},
+            limit=3,
+            client=client,
+        )
+
+    [row] = digest.source_statuses
+    assert row.code == expected_code
+    [error] = digest.errors
+    assert "export API refused" in error
+    assert research_mod._error_class(error) == expected_class
+    assert hint_phrase in _retry_hint(error)
+    if expected_class == "transient":
+        assert "no results list" in error
+
+
+@pytest.mark.asyncio
+async def test_arxiv_fallback_retry_keeps_both_notes(monkeypatch):
+    """A lane that was retried AND served through OpenAlex reports both: the
+    retry note used to replace the provenance note."""
+    import quorum.research as research_mod
+
+    monkeypatch.setattr(research_mod, "_TRANSIENT_RETRY_DELAY_S", 0.0)
+    openalex_calls = 0
+
+    def handler(request):
+        nonlocal openalex_calls
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(406)
+        openalex_calls += 1
+        if openalex_calls == 1:
+            return httpx.Response(500)
+        return httpx.Response(
+            200, json={"results": [_openalex_arxiv_work("CRDTs", "1806.10254")]}
+        )
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "conflict-free replicated data types",
+            sources={"arxiv"},
+            limit=3,
+            client=client,
+        )
+
+    assert not digest.errors
+    [note] = digest.notes
+    assert "retried after a transient failure" in note
+    assert "served from OpenAlex's arXiv index" in note
+
+
+@pytest.mark.asyncio
+async def test_research_digest_notes_arxiv_served_via_openalex():
+    def handler(request):
+        if request.url.host == "export.arxiv.org":
+            return httpx.Response(406)
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    _openalex_arxiv_work(
+                        "Conflict-free replicated data types", "1806.10254"
+                    ),
+                    _openalex_arxiv_work(
+                        "Replicated data types for sync", "2109.10554"
+                    ),
+                    _openalex_arxiv_work(
+                        "Conflict-free data types in practice", "2205.11303"
+                    ),
+                ]
+            },
+        )
+
+    async with _client(handler) as client:
+        digest = await research_topic(
+            "conflict-free replicated data types",
+            sources={"arxiv"},
+            limit=3,
+            client=client,
+        )
+
+    assert [p.identifier for p in digest.papers] == [
+        "1806.10254",
+        "2109.10554",
+        "2205.11303",
+    ]
+    assert any("served from OpenAlex's arXiv index" in n for n in digest.notes)
+    assert "via OpenAlex" in format_digest(digest)
+
+
 def test_reconstruct_abstract_orders_by_position():
     assert _reconstruct_abstract({"b": [1], "a": [0], "c": [2]}) == "a b c"
     assert _reconstruct_abstract(None) == ""
@@ -3221,7 +3408,7 @@ async def test_collision_retains_papers_not_used_to_grade_the_lane(monkeypatch):
         ),
     ]
 
-    async def fake_arxiv(client, query, *, limit, timeout):
+    async def fake_arxiv(client, query, *, limit, timeout, **_openalex):
         return papers
 
     monkeypatch.setattr(research_mod, "search_arxiv", fake_arxiv)
@@ -3906,7 +4093,7 @@ async def test_sources_run_concurrently_while_each_sources_lanes_stay_sequential
     second_openalex_lane_started = asyncio.Event()
     calls: dict[str, list[str]] = {"arxiv": [], "openalex": []}
 
-    async def fake_arxiv(client, query, *, limit, timeout):
+    async def fake_arxiv(client, query, *, limit, timeout, **_openalex):
         calls["arxiv"].append(query)
         if len(calls["arxiv"]) == 1:
             await second_openalex_lane_started.wait()
@@ -3951,7 +4138,7 @@ async def test_arxiv_semantic_lanes_observe_the_polite_gap(monkeypatch):
     async def fake_sleep(delay):
         sleeps.append(delay)
 
-    async def fake_arxiv(client, query, *, limit, timeout):
+    async def fake_arxiv(client, query, *, limit, timeout, **_openalex):
         return []
 
     monkeypatch.setattr(research_mod, "search_arxiv", fake_arxiv)
@@ -4574,3 +4761,98 @@ def test_format_digest_no_prior_art_excludes_field_map_case():
     out = format_digest(d, mode="exploratory")
     assert "_No prior art found._" not in out
     assert "Geophysics" in out
+
+
+@pytest.mark.asyncio
+async def test_github_research_falls_back_to_gh_auth_token(monkeypatch):
+    """With no GH_TOKEN / GITHUB_TOKEN in the environment, GitHub search ran
+    anonymous (about 10 requests a minute), which back-to-back research calls
+    exhaust with 403s (public repo issue #5). A signed-in `gh` now supplies the
+    token, sent as a Bearer header only; an environment token still wins."""
+    import quorum.research as research_mod
+
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    gh_reads = 0
+
+    def fake_gh_auth_token():
+        nonlocal gh_reads
+        gh_reads += 1
+        return "gho_from_gh"
+
+    monkeypatch.setattr(research_mod, "_gh_auth_token", fake_gh_auth_token)
+    seen: list[str | None] = []
+
+    def handler(request):
+        seen.append(request.headers.get("authorization"))
+        assert "gho_from_gh" not in str(request.url)
+        if request.url.host == "api.openalex.org":
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, text='{"items": []}')
+
+    # gh is consulted only when GitHub is actually searched: a papers-only
+    # call must not spawn a subprocess (and an API round trip) for nothing.
+    async with _client(handler) as client:
+        await research_topic("diffusion", sources={"openalex"}, client=client)
+    assert gh_reads == 0
+    seen.clear()
+
+    async with _client(handler) as client:
+        await research_topic("diffusion", sources={"github"}, client=client)
+    assert gh_reads == 1
+    assert seen and set(seen) == {"Bearer gho_from_gh"}
+
+    monkeypatch.setenv("GH_TOKEN", "ghp_from_env")
+    seen.clear()
+    async with _client(handler) as client:
+        await research_topic("diffusion", sources={"github"}, client=client)
+    assert seen and set(seen) == {"Bearer ghp_from_env"}
+
+
+def test_gh_auth_token_reads_a_signed_in_gh(tmp_path, monkeypatch):
+    """`gh auth token` is the source, read only after `gh auth status` has
+    validated the token against the API (a stale hosts.yml token prints fine
+    but would 401). Both calls run with stdin closed: in the MCP server stdin
+    is the JSON-RPC pipe. A gh that is absent or whose status check fails
+    yields None rather than an error."""
+    import subprocess
+
+    import quorum.research as research_mod
+
+    gh = tmp_path / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        '  status) exit "${FAKE_GH_STATUS_EXIT:-0}" ;;\n'
+        "  token) printf 'gho_fake\\n' ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n"
+    )
+    gh.chmod(0o755)
+    monkeypatch.setattr(research_mod.shutil, "which", lambda name: str(gh))
+    calls: list[tuple[list[str], object]] = []
+    real_run = subprocess.run
+
+    def spy_run(cmd, **kwargs):
+        calls.append((cmd[1:], kwargs.get("stdin")))
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(research_mod.subprocess, "run", spy_run)
+
+    monkeypatch.setenv("FAKE_GH_STATUS_EXIT", "0")
+    assert research_mod._read_gh_auth_token() == "gho_fake"
+    assert [argv for argv, _ in calls] == [
+        ["auth", "status", "--hostname", "github.com"],
+        ["auth", "token", "--hostname", "github.com"],
+    ]
+    assert all(stdin is subprocess.DEVNULL for _, stdin in calls)
+
+    calls.clear()
+    monkeypatch.setenv("FAKE_GH_STATUS_EXIT", "1")
+    assert research_mod._read_gh_auth_token() is None
+    assert [argv for argv, _ in calls] == [
+        ["auth", "status", "--hostname", "github.com"]
+    ]
+
+    monkeypatch.setattr(research_mod.shutil, "which", lambda name: None)
+    assert research_mod._read_gh_auth_token() is None

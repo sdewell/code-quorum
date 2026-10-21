@@ -911,3 +911,23 @@ async def test_run_mode_verbose_keeps_discipline_drops_caps() -> None:
     prompt = agent.prompts[0]
     assert "path:line" in prompt
     assert "highest-signal" not in prompt
+
+
+def test_select_agents_skip_disabled_narrows_an_explicit_roster() -> None:
+    mc.record_choice("gemini", {"disabled": "true"})
+    chosen, skipped = select_agents(
+        ["codex", "opencode", "gemini"],
+        roles=["visionary:codex", "visionary:opencode", "pioneer:gemini"],
+        host="claude",
+        skip_disabled=True,
+    )
+    assert [a.name for a in chosen] == ["codex", "opencode"]
+    assert [a.role for a in chosen] == ["visionary", "visionary"]
+    assert skipped == ["gemini"]
+
+
+def test_select_agents_explicit_roster_without_skip_disabled_still_runs_it() -> None:
+    mc.record_choice("gemini", {"disabled": "true"})
+    chosen, skipped = select_agents(["codex", "gemini"], host="claude")
+    assert [a.name for a in chosen] == ["codex", "gemini"]
+    assert skipped == []

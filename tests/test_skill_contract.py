@@ -301,6 +301,13 @@ def test_q_skystorm_stage1_pins_agents_explicitly() -> None:
     assert '["codex", "opencode", "gemini"]' in _skill("q-skystorm")
 
 
+def test_q_skystorm_dream_stage_skips_seats_the_user_disabled() -> None:
+    step3 = _skill("q-skystorm").split("## Step 3")[1].split("## Step 4")[0]
+    step4 = _skill("q-skystorm").split("## Step 4")[1].split("## Step 5")[0]
+    assert "`skip_disabled`: `true`" in step3
+    assert "(disabled, skipped)" in step4
+
+
 def test_q_brainstorm_extended_await_relays_liveness() -> None:
     """The --extended flow runs a SECOND q_await whose result also begins with
     the Council: liveness line. The skill must instruct relaying it too, not

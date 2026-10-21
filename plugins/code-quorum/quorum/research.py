@@ -15,9 +15,12 @@ import datetime
 import functools
 import os
 import re
+import shutil
+import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TypeVar, cast
 from xml.etree import ElementTree as ET
 
@@ -171,6 +174,56 @@ def _clean_token(token: str | None) -> str | None:
     return token
 
 
+_GH_AUTH_TOKEN_TIMEOUT_S = 5.0
+
+
+def _run_gh(gh: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """One `gh` call. stdin is closed on purpose: inside the MCP server stdin is
+    the JSON-RPC pipe, and a gh that decides to prompt would otherwise read
+    from it. None when gh is slow, crashes or cannot start."""
+    try:
+        return subprocess.run(
+            [gh, *args],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_GH_AUTH_TOKEN_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _read_gh_auth_token() -> str | None:
+    """The token a signed-in `gh` holds, for GitHub search when neither
+    GH_TOKEN nor GITHUB_TOKEN is set. Anonymous GitHub search allows about 10
+    requests a minute and one research call fans out several, so back-to-back
+    calls (brainstorm, then skystorm's anchor and pivot) hit 403s (public repo
+    issue #5). None when gh is absent, signed out, slow or silent; the search
+    then runs anonymous as before.
+
+    `gh auth token` prints whatever hosts.yml holds, revoked or not, and a
+    stale token would turn a GitHub lane that worked anonymously into a 401
+    classed CONFIG. So `gh auth status` validates the token against the API
+    first; it exits 1 for a revoked or expired one (gh 2.100.0, observed), and
+    any non-zero exit sends the search anonymous."""
+    gh = shutil.which("gh")
+    if not gh:
+        return None
+    status = _run_gh(gh, "auth", "status", "--hostname", "github.com")
+    if status is None or status.returncode != 0:
+        return None
+    proc = _run_gh(gh, "auth", "token", "--hostname", "github.com")
+    if proc is None or proc.returncode != 0:
+        return None
+    return _clean_token(proc.stdout)
+
+
+# Once per process: the answer cannot change mid-run and `gh` is a subprocess.
+# A module seam, so the suite can neutralize it (tests/conftest.py).
+_gh_auth_token = functools.cache(_read_gh_auth_token)
+
+
 def _redact(text: str, secrets: Iterable[str]) -> str:
     """Replace any secret value with <redacted> -- a backstop so a token can
     never surface in a rendered digest, whatever error path produced the text."""
@@ -208,12 +261,27 @@ def _is_auth_error(low: str) -> bool:
     return "401 unauthorized" in low or "403 forbidden" in low
 
 
+def _is_arxiv_refused(low: str) -> bool:
+    # search_arxiv's own phrase for 'export.arxiv.org refused the host and the
+    # OpenAlex arXiv fallback failed too'. The text after it is the fallback's
+    # error, so the class and hint follow that cause: a refused string is
+    # config only when OpenAlex refused as well, rate on a 429, and otherwise
+    # transient (the retry re-enters the fallback; the marker file skips arXiv).
+    return low.startswith("arxiv:") and "export api refused" in low
+
+
+def _is_openalex_lane(low: str) -> bool:
+    # OpenAlex's own lane, or the arXiv lane served through OpenAlex's arXiv
+    # index after export.arxiv.org refused (see _is_arxiv_refused).
+    return low.startswith("openalex:") or _is_arxiv_refused(low)
+
+
 def _is_openalex_shedding(low: str) -> bool:
-    return low.startswith("openalex:") and "503 service" in low
+    return _is_openalex_lane(low) and "503 service" in low
 
 
 def _is_openalex_key_required(low: str) -> bool:
-    return low.startswith("openalex:") and "409 conflict" in low
+    return _is_openalex_lane(low) and "409 conflict" in low
 
 
 def _is_config_error(low: str) -> bool:
@@ -286,6 +354,13 @@ def _retry_hint(error: str) -> str:
       pointing at a free API key. Deliberate refusal, not a flake.
     - anything else (timeout, flake, a non-arXiv 400) -- transient; retry as-is."""
     low = error.lower()
+    if _is_arxiv_refused(low) and _is_config_error(low):
+        return (
+            "export.arxiv.org is refusing this machine (a host-level throttle "
+            "that waiting does not clear) and the OpenAlex arXiv fallback was "
+            "refused too — do not retry arXiv; proceed on the other paper "
+            "sources and say so"
+        )
     if _is_arxiv_rate_refusal(low):
         return (
             "arXiv refused the request — its rate limit arrives as HTTP 200 "
@@ -301,6 +376,14 @@ def _retry_hint(error: str) -> str:
         )
     if _is_arxiv_non_feed(low):
         return _TRANSIENT_HINT
+    if _is_arxiv_refused(low):
+        return (
+            "export.arxiv.org is refusing this machine (a host-level throttle "
+            "that waiting does not clear) and the OpenAlex arXiv fallback hit "
+            "a transient error — retry the same query once; shortening it will "
+            "not help, and if it fails again proceed on the other paper "
+            "sources and say so"
+        )
     if _is_arxiv_query_error(low):
         return (
             "the query could not be mechanically repaired — semantically re-anchor "
@@ -539,10 +622,144 @@ def _claim_rate_slot(now: float) -> float | None:
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 
+# export.arxiv.org answers 406 (sometimes 403/503) to every cache-missing query
+# once it throttles a host, and waiting minutes does not clear it. Such a
+# refusal is remembered across processes so later calls go straight to
+# OpenAlex's arXiv index instead of re-hitting a host that is refusing us.
+_ARXIV_REFUSED_STATUSES = frozenset({403, 406, 503})
+_ARXIV_REFUSAL_COOLDOWN_S = 1800.0
+ARXIV_REFUSAL_MARKER = (
+    Path.home() / ".cache" / "code-quorum" / "arxiv-export-refused-until"
+)
+_OPENALEX_ARXIV_SOURCE = "S4306400194"
+
+
+class _ServedPapers(list):
+    note: str = ""
+
+
+def _arxiv_refusal_active(now: float) -> bool:
+    try:
+        return float(ARXIV_REFUSAL_MARKER.read_text().strip()) > now
+    except (OSError, ValueError):
+        return False
+
+
+def _mark_arxiv_refused(now: float) -> None:
+    try:
+        ARXIV_REFUSAL_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ARXIV_REFUSAL_MARKER.with_suffix(".tmp")
+        tmp.write_text(f"{now + _ARXIV_REFUSAL_COOLDOWN_S}\n")
+        os.replace(tmp, ARXIV_REFUSAL_MARKER)
+    except OSError:
+        pass
+
+
+async def _search_arxiv_via_openalex(
+    client: httpx.AsyncClient,
+    query: str,
+    *,
+    limit: int,
+    timeout: float,
+    email: str | None,
+    api_key: str | None,
+    reason: str,
+) -> list[Paper]:
+    headers = {"User-Agent": f"code-quorum (mailto:{email})"} if email else {}
+    api_key = _clean_token(api_key)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        resp = await client.get(
+            _OPENALEX_URL,
+            params={
+                "search": query,
+                "filter": f"primary_location.source.id:{_OPENALEX_ARXIV_SOURCE}",
+                "per-page": limit,
+                "sort": "relevance_score:desc",
+                "select": (
+                    "title,publication_year,doi,authorships,"
+                    "abstract_inverted_index,primary_location"
+                ),
+            },
+            headers=headers,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        works = resp.json().get("results")
+        if not isinstance(works, list):
+            raise ValueError(
+                f"OpenAlex returned no results list ({type(works).__name__})"
+            )
+    except Exception as exc:  # noqa: BLE001 -- reported as the refusal's cause
+        raise RuntimeError(
+            f"arXiv export API refused ({reason}) and the OpenAlex arXiv "
+            f"fallback failed: {type(exc).__name__}: {exc}"
+        ) from exc
+    papers = _ServedPapers()
+    papers.note = (
+        f"served from OpenAlex's arXiv index because {reason}; "
+        "arXiv ids and links are unchanged"
+    )
+    for work in works:
+        if not isinstance(work, dict):
+            continue
+        title = (work.get("title") or "").strip()
+        if not title:
+            continue
+        landing = ((work.get("primary_location") or {}).get("landing_page_url")) or ""
+        arxiv_id = _arxiv_id_from_doi(work.get("doi") or "") or (
+            landing.rsplit("/abs/", 1)[-1] if "/abs/" in landing else ""
+        )
+        if not arxiv_id:
+            continue
+        papers.append(
+            Paper(
+                title=title,
+                authors=tuple(
+                    name
+                    for authorship in work.get("authorships", [])
+                    if (
+                        name := (
+                            (authorship.get("author") or {}).get("display_name") or ""
+                        ).strip()
+                    )
+                ),
+                year=work.get("publication_year"),
+                source="arxiv",
+                identifier=arxiv_id,
+                url=f"https://arxiv.org/abs/{arxiv_id}",
+                abstract=_reconstruct_abstract(work.get("abstract_inverted_index")),
+                research_source="arxiv",
+                strata=("via OpenAlex",),
+            )
+        )
+    return papers
+
 
 async def search_arxiv(
-    client: httpx.AsyncClient, query: str, *, limit: int, timeout: float
+    client: httpx.AsyncClient,
+    query: str,
+    *,
+    limit: int,
+    timeout: float,
+    openalex_email: str | None = None,
+    openalex_api_key: str | None = None,
 ) -> list[Paper]:
+    fallback = functools.partial(
+        _search_arxiv_via_openalex,
+        client,
+        query,
+        limit=limit,
+        timeout=timeout,
+        email=openalex_email,
+        api_key=openalex_api_key,
+    )
+    if _arxiv_refusal_active(time.time()):
+        return await fallback(
+            reason="export.arxiv.org refused this machine within the last "
+            f"{int(_ARXIV_REFUSAL_COOLDOWN_S // 60)} minutes"
+        )
     resp = await client.get(
         _ARXIV_URL,
         params={
@@ -552,6 +769,11 @@ async def search_arxiv(
         },
         timeout=timeout,
     )
+    if resp.status_code in _ARXIV_REFUSED_STATUSES:
+        _mark_arxiv_refused(time.time())
+        return await fallback(
+            reason=f"export.arxiv.org refused the query with HTTP {resp.status_code}"
+        )
     resp.raise_for_status()
     if "<feed" not in resp.text:
         # arXiv signals its rate limit as HTTP 200 with a tiny plain-text body
@@ -2440,6 +2662,8 @@ async def research_topic(
         context7_api_key = os.environ.get("CONTEXT7_API_KEY")
     if github_token is None:
         github_token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if not github_token and "github" in sources:
+            github_token = await asyncio.to_thread(_gh_auth_token)
     if hf_token is None:
         hf_token = os.environ.get("QUORUM_HF_TOKEN") or os.environ.get("HF_TOKEN")
     # Secret values that must never surface in a rendered digest -- a backstop for
@@ -2464,7 +2688,14 @@ async def research_topic(
     # `sources` -- dict order matches DEFAULT_SOURCES, so filtering preserves
     # iteration order regardless of what order `sources` was requested in.
     all_factories = {
-        "arxiv": lambda q: search_arxiv(client, q, limit=limit, timeout=timeout),
+        "arxiv": lambda q: search_arxiv(
+            client,
+            q,
+            limit=limit,
+            timeout=timeout,
+            openalex_email=email,
+            openalex_api_key=openalex_api_key,
+        ),
         "openalex": lambda q: search_openalex(
             client,
             q,
@@ -2563,6 +2794,12 @@ async def research_topic(
     excluded_collision_by_source: dict[str, int] = {}
     paper_groups: dict[str, list[tuple[str, list[Paper]]]] = {}
     for lane, query, name, value, err, note in results:
+        # A lane can carry two notes: the retry note from `_contained` and the
+        # provenance note a served-elsewhere result wears (`_ServedPapers`).
+        # Both are kept; the retry note must not hide where the papers came from.
+        served = getattr(value, "note", None)
+        if served:
+            note = f"{note}; {served}" if note else served
         if note:
             notes.append(_redact(f"{name} [{lane}]: {note}", secrets))
         row = _source_lane_status(name, lane, query, value or [], err)

@@ -121,6 +121,9 @@ Call `mcp__quorum_codex__q_brainstorm_start` with:
 - `host`: `"codex"`.
 - `agents`: `["claude", "gemini", "opencode"]`.
 - `roles`: `["visionary:claude", "pioneer:gemini", "visionary:opencode"]`.
+- `skip_disabled`: `true`, unless the user explicitly asked for a seat, so a
+  seat marked disabled in `quorum setup-models` is left out instead of failing.
+  A `(disabled, skipped)` seat is the user's opt-out, not a degraded council.
 - `research`: the **pivot digest** from Step 2, passed verbatim. If several
   pivots ran, use the strongest cross-domain digest (or two short digests).
   Omit it under `--no-research` or when recovery still leaves a

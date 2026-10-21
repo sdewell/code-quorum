@@ -35,6 +35,29 @@ def _reset_model_config_warn_once():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_arxiv_refusal_marker(tmp_path, monkeypatch):
+    from quorum import research as _research_mod
+
+    monkeypatch.setattr(
+        _research_mod, "ARXIV_REFUSAL_MARKER", tmp_path / "arxiv-export-refused-until"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_github_token_from_the_machine(monkeypatch):
+    """research_topic falls back to `gh auth token` when the environment holds
+    no GitHub token. The suite must never shell out to the real gh (a signed-in
+    developer machine would put a real token into header assertions), so the
+    seam is neutral here and the environment is cleared; the fallback's own
+    tests patch the seam back in."""
+    from quorum import research as _research_mod
+
+    monkeypatch.setattr(_research_mod, "_gh_auth_token", lambda: None)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_model_config_path(tmp_path, monkeypatch):
     """Point model_config.CONFIG_PATH at a per-test tmp path (absent by
     default) so the suite is hermetic against a REAL

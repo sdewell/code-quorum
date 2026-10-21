@@ -2907,7 +2907,7 @@ def _live_gate() -> bool:
     return bool(
         os.environ.get("CODE_QUORUM_AGY_E2E")
         and shutil.which("agy")
-        and gc.AGY_OAUTH_PATH.exists()
+        and gc._is_logged_in()
         and gc.verify_read_only_config() is None
     )
 
@@ -3430,3 +3430,22 @@ def test_live_seat_models_route_to_expected_backend(tmp_path: Path, model: str) 
         f"--model {model!r} routed correctly and exited 0 but served no answer; "
         f"stdout: {proc.stdout[:300]!r}"
     )
+
+
+def test_is_logged_in_accepts_agy_token_without_legacy_creds(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """agy 1.2.x signs in to ~/.gemini/antigravity-cli/antigravity-oauth-token
+    and never writes the legacy Gemini CLI file ~/.gemini/oauth_creds.json. A
+    fresh install must count as signed in on the token alone: gating on the
+    legacy file reported 'not signed in' on every council run while `agy` and
+    `quorum auth-check` both worked (public repo issue #4)."""
+    gemini = tmp_path / "fresh-gemini"
+    monkeypatch.setattr(_gc, "AGY_GEMINI_DIR", gemini)
+    monkeypatch.setattr(_gc, "AGY_OAUTH_PATH", gemini / "oauth_creds.json")
+    assert _gc._is_logged_in() is False
+
+    token = gemini / "antigravity-cli" / _gc._AGY_TOKEN_NAME
+    token.parent.mkdir(parents=True)
+    token.write_text("TOKEN")
+    assert _gc._is_logged_in() is True

@@ -160,6 +160,9 @@ Call `mcp__plugin_code-quorum_quorum__q_brainstorm_start` with:
 - `host`: `"claude"`
 - `agents`: `["codex", "opencode", "gemini"]`
 - `roles`: `["visionary:codex", "visionary:opencode", "pioneer:gemini"]`
+- `skip_disabled`: `true` — unless the user explicitly asked for a seat, so a
+  seat they marked disabled in `quorum setup-models` is left out instead of
+  failing
 - `research`: the **pivot digest** markdown from Step 2 (the cross-domain
   evidence + field map), passed **verbatim** — the raw `q_research` return
   value, unedited. Never your summary of it, and never your own Step-1 ideas
@@ -175,7 +178,8 @@ Call `mcp__plugin_code-quorum_quorum__q_brainstorm_start` with:
 
 Pin `agents` explicitly (don't rely on the server default roster) so the dream
 stage is always exactly two visionaries + one pioneer, even if the default
-council changes.
+council changes. `skip_disabled` narrows that pin only by the seats the user
+disabled; the dream stage then runs with the remaining seats.
 
 Two visionaries (feasibility off, non-obvious connections) and one pioneer
 (bold but buildable — smallest real first step). The seeded digest gives them
@@ -193,7 +197,9 @@ in one line which members fired and worked, including any that returned nothing 
 errored, so a quiet visionary is not mistaken for a silent failure.
 
 If any expected seat is missing or failed, also report a line beginning
-`Council degraded:` that names each unavailable seat and its status. Continue
+`Council degraded:` that names each unavailable seat and its status. A seat
+shown as `(disabled, skipped)` is the user's own opt-out, not a failure; do not
+count it as degraded. Continue
 with the available seats, but never describe the spread as complete or full
 when the council is degraded.
 

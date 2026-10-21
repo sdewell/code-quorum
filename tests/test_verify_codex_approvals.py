@@ -191,7 +191,14 @@ def test_workshop_release_runbook_owns_github_install_verification() -> None:
     )
 
     assert "--project-root /path/to/stable/code-quorum" in releasing
-    assert "plugins/cache/code-quorum" not in releasing
+    # The Codex verifier runs from the stable checkout, never from Claude's
+    # plugin cache. The cache path may appear in the Claude refresh step (the
+    # `uv sync` that builds the installed plugin's environment), so the check
+    # is per line, not for the whole file.
+    for line in releasing.splitlines():
+        if "plugins/cache/code-quorum" in line:
+            assert "verify_codex_approvals" not in line
+            assert "codex" not in line.lower()
     assert "codex plugin marketplace add sdewell/code-quorum --ref main" in releasing
     assert "config.toml.pre-X.Y.Z.$(date +%s)" in releasing
     assert "git -C /path/to/stable/code-quorum pull --ff-only" in releasing

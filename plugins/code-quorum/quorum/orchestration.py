@@ -329,8 +329,9 @@ class SeatSelection(NamedTuple):
     runs; `skipped` names default-roster seats left out because they're
     marked disabled (always empty when `names` was given explicitly -- that
     is a deliberate override and must still be able to run a disabled
-    seat). The single place this decision is made; callers must not
-    re-derive it."""
+    seat -- unless the caller passed `skip_disabled`, as a skill pinning a
+    fixed roster does). The single place this decision is made; callers
+    must not re-derive it."""
 
     agents: list[Agent]
     skipped: list[str]
@@ -341,6 +342,7 @@ def select_agents(
     roles: list[str] | None = None,
     gemini_model: str | None = None,
     host: str | None = None,
+    skip_disabled: bool = False,
 ) -> SeatSelection:
     profile = resolve_host(host)
     skipped: list[str] = []
@@ -364,8 +366,11 @@ def select_agents(
                     f"agent '{n}' is the active orchestrator for host "
                     f"{profile.name!r}; it cannot also run as a subprocess seat"
                 )
+            if skip_disabled and seat_disabled(n):
+                skipped.append(n)
+                continue
             selected.append(_build_seat(n, gemini_model, profile))
-    _assign_roles(selected, roles, profile, set(skipped) if not names else set())
+    _assign_roles(selected, roles, profile, set(skipped))
     return SeatSelection(selected, skipped)
 
 

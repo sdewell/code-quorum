@@ -106,6 +106,14 @@ _AGY_TOKEN_NAME = "antigravity-oauth-token"
 # runs' data and never enters a private home.
 _AGY_SEED_FILES = (_AGY_TOKEN_NAME, "settings.json", "installation_id")
 
+
+def _agy_token_path() -> Path:
+    """Where agy 1.2.x keeps its sign-in; the file every private home is
+    seeded from. Derived at call time so tests that move AGY_GEMINI_DIR
+    move this with it."""
+    return AGY_GEMINI_DIR / "antigravity-cli" / _AGY_TOKEN_NAME
+
+
 # Return codes. Distinct so a silent empty/failed turn reads as failed, not OK.
 GEMINI_CLI_NO_BINARY_RC = 127
 GEMINI_CLI_NOT_LOGGED_IN_RC = 2
@@ -346,7 +354,7 @@ def _retire_private_agy_home(private: _PrivateAgyHome) -> None:
             ).read_bytes()
         except OSError:
             refreshed = b""
-        real_token = AGY_GEMINI_DIR / "antigravity-cli" / _AGY_TOKEN_NAME
+        real_token = _agy_token_path()
         if (
             refreshed
             and private.token_seed is not None
@@ -1308,8 +1316,13 @@ _AUTH_HINTS = (
 
 def _is_logged_in() -> bool:
     """Heuristic login gate (module seam so tests can override it without
-    monkeypatching Path.exists globally)."""
-    return AGY_OAUTH_PATH.exists()
+    monkeypatching Path.exists globally). agy 1.2.x signs in to
+    ~/.gemini/antigravity-cli/antigravity-oauth-token and never writes the
+    legacy Gemini CLI file ~/.gemini/oauth_creds.json that earlier releases
+    shared; either counts. Gating on the legacy file alone reported every
+    fresh install as not signed in (public repo issue #4), and the verifying
+    machine's leftover copy hid it."""
+    return _agy_token_path().exists() or AGY_OAUTH_PATH.exists()
 
 
 def _looks_like_auth_error(stderr: str) -> bool:
@@ -1619,8 +1632,8 @@ class GeminiCliAgent(Agent):
                 agent=self.name,
                 output="",
                 error=(
-                    f"agy not signed in ({AGY_OAUTH_PATH} missing). Run `agy` once "
-                    "to sign in with your AI Pro account."
+                    f"agy not signed in ({_agy_token_path()} missing). Run `agy` "
+                    "once to sign in with your AI Pro account."
                 ),
                 returncode=GEMINI_CLI_NOT_LOGGED_IN_RC,
                 duration_s=time.monotonic() - start,

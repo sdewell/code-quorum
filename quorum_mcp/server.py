@@ -182,6 +182,7 @@ async def q_brainstorm_start(
     gemini_model: str | None = None,
     verbose: bool = False,
     host: str | None = None,
+    skip_disabled: bool = False,
 ) -> dict[str, str]:
     """Start a q-brainstorm run in the background. Returns {"job_id":
     str} immediately. Each agent contributes 3-5 distinct ideas with
@@ -217,10 +218,22 @@ async def q_brainstorm_start(
     this invocation only (an id exactly as printed by `agy models`, e.g.
     'claude-opus-4-6-thinking').
 
+    `skip_disabled`, with an explicit `agents` list, leaves out any listed
+    seat the user marked disabled in `quorum setup-models` (reported as
+    `disabled, skipped`, and roles aimed at it are ignored) -- for a skill
+    that pins a fixed roster. Without it an explicit list always runs every
+    seat named.
+
     Expected wall-clock to completion: 30s-4min depending on the agents
     and topic complexity."""
     target_cwd = _resolve_cwd(cwd)
-    chosen, skipped = select_agents(agents, roles, gemini_model=gemini_model, host=host)
+    chosen, skipped = select_agents(
+        agents,
+        roles,
+        gemini_model=gemini_model,
+        host=host,
+        skip_disabled=skip_disabled,
+    )
     if not chosen:
         return await _no_live_seats_job(skipped)
     coro = _run_and_format(
