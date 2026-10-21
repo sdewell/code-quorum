@@ -21,6 +21,15 @@ Claude adapter additionally permits `CLAUDE_CONFIG_DIR` and its selected
 resolved `OPENROUTER_API_KEY` after its other environment values have been
 filtered.
 
+The OpenCode adapter resolves its key from the environment first. On macOS,
+an absent or blank value permits a lookup of the login account's dedicated
+`code-quorum-openrouter` Keychain item through `/usr/bin/security`. Creating
+that item opts in. The lookup closes stdin, captures output without logging
+it, and times out after five seconds. Failed or empty lookups leave OpenCode
+unavailable with setup instructions. The resolved key is not added to the
+host's environment, generated configuration, or other seats' environments.
+This lookup runs in a worker thread so it does not block the other seats.
+
 Research authentication is isolated at the request-header level, not the
 process level. OpenAlex, Context7, GitHub, and Hugging Face requests receive only
 their selected provider's Bearer token. arXiv and Europe PMC requests receive no
@@ -33,7 +42,7 @@ authorization header.
 | Storage and response | Choose an appropriate platform storage/delivery mechanism; set service limits; rotate or revoke after suspected exposure. | Avoid intentional credential persistence or disclosure and document the boundaries that remain outside this guarantee. |
 
 Authentication failures follow each adapter's actual behavior rather than one
-uniform promise. A missing `OPENROUTER_API_KEY` prevents OpenCode use, and a
+uniform promise. A missing OpenRouter key prevents OpenCode use, and a
 missing `GEMINI_API_KEY` prevents the opt-in Gemini SDK backend. Claude and agy
 subscription failures make those seats unavailable. Codex delegates login
 handling to its CLI and reports a failed run. Research sources follow the
@@ -87,8 +96,8 @@ before queueing a request.
 
 ### OpenCode isolation
 
-The OpenCode seat requires `OPENROUTER_API_KEY` but does not load your personal
-OpenCode configuration. Each run uses an isolated HOME at
+The OpenCode seat requires a resolved OpenRouter key but does not load your
+personal OpenCode configuration. Each run uses an isolated HOME at
 `~/.cache/code-quorum/opencode-sandbox`, and Code Quorum rebuilds this generated
 configuration before each run.
 
@@ -193,6 +202,9 @@ applications; it does not remove the already-running host's inherited copy, and
 an enabled downstream route still receives the credential it requires. Logout
 or reboot also clears the login-session value. Code Quorum's portable public
 interface remains environment variables and does not require Apple Keychain.
+The optional OpenCode Keychain fallback above avoids login-session environment
+delivery for that key. Code Quorum reads only the dedicated item and does not
+create, update, or delete it.
 
 ## Codex approvals and authorization
 

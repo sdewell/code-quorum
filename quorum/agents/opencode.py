@@ -2,8 +2,11 @@ import asyncio
 import json
 import logging
 import os
+import pwd
 import shutil
 import sqlite3
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -264,12 +267,47 @@ _RELAY_ENV_VAR = "CODE_QUORUM_OPENCODE_RELAY"
 _NPM_CACHE_PRUNE_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB
 
 
+_KEYCHAIN_SECURITY = "/usr/bin/security"
+
+
+def _platform() -> str:
+    """Keep platform overrides local to this adapter's tests."""
+    return sys.platform
+
+
 def _resolve_openrouter_key(environ: dict[str, str] | None = None) -> str | None:
-    """Resolve OPENROUTER_API_KEY from the process environment. Returns None
-    if it's absent or empty."""
+    """Use the environment key, then the dedicated macOS Keychain item.
+
+    Creating that item opts in. Resolve only for OpenCode and never export
+    its value into the host environment or other seats."""
     env = os.environ if environ is None else environ
     value = env.get("OPENROUTER_API_KEY", "").strip()
-    return value or None
+    if value:
+        return value
+    if _platform() != "darwin":
+        return None
+    try:
+        result = subprocess.run(
+            [
+                _KEYCHAIN_SECURITY,
+                "find-generic-password",
+                "-a",
+                pwd.getpwuid(os.getuid()).pw_name,
+                "-s",
+                "code-quorum-openrouter",
+                "-w",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError, KeyError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
 
 
 _OPENROUTER_PREFIX = "openrouter/"
@@ -853,14 +891,17 @@ class OpenCodeAgent(Agent):
         # user's global opencode config (AGENTS.md, instructions[], skills)
         # cannot contaminate the council voice or bloat the prompt.
         start = time.monotonic()
-        api_key = _resolve_openrouter_key()
+        api_key = await asyncio.to_thread(_resolve_openrouter_key)
         if api_key is None:
             return AgentResult(
                 agent=self.name,
                 output="",
                 error=(
-                    "OPENROUTER_API_KEY not found. Export it in your shell "
-                    "environment (get a key at https://openrouter.ai)."
+                    "OpenCode needs an OpenRouter key. Set OPENROUTER_API_KEY "
+                    "before starting the host, or on macOS store the Keychain "
+                    "item 'code-quorum-openrouter' for your login account "
+                    "(see README.md). Restart the desktop app after changing "
+                    "its environment. Get a key at https://openrouter.ai."
                 ),
                 returncode=2,
                 duration_s=time.monotonic() - start,

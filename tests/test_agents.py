@@ -1132,8 +1132,11 @@ async def test_opencode_run_recorded_source_no_api_key_gets_no_hint(
     assert result.returncode == 2
     assert "quorum setup-models" not in result.error
     assert result.error == (
-        "OPENROUTER_API_KEY not found. Export it in your shell environment "
-        "(get a key at https://openrouter.ai)."
+        "OpenCode needs an OpenRouter key. Set OPENROUTER_API_KEY "
+        "before starting the host, or on macOS store the Keychain "
+        "item 'code-quorum-openrouter' for your login account "
+        "(see README.md). Restart the desktop app after changing "
+        "its environment. Get a key at https://openrouter.ai."
     )
 
 

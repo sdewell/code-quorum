@@ -6,6 +6,14 @@ from quorum import orchestration as _orchestration_mod
 
 
 @pytest.fixture(autouse=True)
+def _isolate_openrouter_keychain(tmp_path, monkeypatch):
+    from quorum.agents import opencode
+
+    # Never read the developer's Keychain, even in a test of a missing key.
+    monkeypatch.setattr(opencode, "_KEYCHAIN_SECURITY", str(tmp_path / "no-security"))
+
+
+@pytest.fixture(autouse=True)
 def _reset_version_caches():
     """claude/codex/opencode/agy `<binary> --version` results are cached in
     quorum.model_config.probe_cli_version (functools.cache, shared by every

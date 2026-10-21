@@ -180,47 +180,49 @@ def test_run_against_incompatible_code_quorum_reports_clean_error(
     assert "Traceback" not in result.stderr
 
 
-def test_workshop_release_runbook_owns_github_install_verification() -> None:
+def test_release_runbook_separates_local_refresh_and_github_verification() -> None:
     releasing = (_ROOT / "docs" / "RELEASING.md").read_text(encoding="utf-8")
     flat = " ".join(releasing.split())
+    local, github = releasing.split("## GitHub-install verification", maxsplit=1)
     verifier_invocations = re.findall(
-        r"uv run (?:--no-sync )?--directory /path/to/stable/code-quorum\s*"
-        r"\\?\s*python /path/to/workshop/code-quorum/"
-        r"scripts/verify_codex_approvals\.py",
-        releasing,
+        r'uv run --no-sync --directory "\$(?:current_runtime|runtime_root)"\s*'
+        r'\\?\s*python "\$workshop_root/scripts/verify_codex_approvals\.py"',
+        local,
     )
 
-    assert "--project-root /path/to/stable/code-quorum" in releasing
-    # The Codex verifier runs from the stable checkout, never from Claude's
-    # plugin cache. The cache path may appear in the Claude refresh step (the
-    # `uv sync` that builds the installed plugin's environment), so the check
-    # is per line, not for the whole file.
+    assert '--project-root "$runtime_root"' in local
+    # Claude's cache can appear in its refresh step, but is not a Codex runtime.
     for line in releasing.splitlines():
         if "plugins/cache/code-quorum" in line:
             assert "verify_codex_approvals" not in line
             assert "codex" not in line.lower()
-    assert "codex plugin marketplace add sdewell/code-quorum --ref main" in releasing
-    assert "config.toml.pre-X.Y.Z.$(date +%s)" in releasing
-    assert "git -C /path/to/stable/code-quorum pull --ff-only" in releasing
+    assert 'codex plugin marketplace add "$marketplace_root"' in local
+    github_install = "codex plugin marketplace add sdewell/code-quorum --ref main"
+    assert github_install not in local
+    assert github_install in github
+    assert 'mktemp "$HOME/.codex/config.toml.pre-X.Y.Z.XXXXXXXX"' in local
+    assert 'uv sync --directory "$runtime_root"' in local
+    assert (
+        'marketplace_root="$HOME/.local/share/code-quorum/marketplace-X.Y.Z"' in local
+    )
+    assert 'runtime_root="$marketplace_root/plugins/code-quorum"' in local
     assert "copy only the six Code Quorum" in flat
     assert "approval blocks from" in releasing
     assert "Code Quorum version" in releasing
-    assert "required GitHub-install verification" in flat
-    assert "GitHub-install verification" in releasing
     assert "scripts/verify_codex_approvals.py" in releasing
     assert "workshop-only" in releasing
     assert len(verifier_invocations) >= 2
-    assert "uv run --no-sync --directory /path/to/stable/code-quorum" in releasing
-    assert "persistent checkout of the public `sdewell/code-quorum`" in flat
-    assert "stable workshop checkout" not in flat
-    assert "stable helper checkout" not in flat
-    assert "stable public runtime checkout" not in flat
+    assert "/path/to/stable/code-quorum" not in releasing
+    assert "does not verify installation from GitHub" in flat
     assert "always reads `~/.codex/config.toml`" in flat
-    assert "~/.local/share/code-quorum/marketplace-local-X.Y.Z" in releasing
-    assert "source-swap fallback" in releasing
+    assert 'codex plugin marketplace add "$previous_marketplace"' in local
     assert "true first install" in releasing
     assert "one-time namespace migration" in flat
     assert "approve the six `quorum_codex` tools" in flat
     assert "one workflow cannot prompt for all six approvals" in flat
     assert "configure every entry shown in `SECURITY.md`" in flat
-    assert "source checkout can now exercise" in flat
+    assert "Run this required release test separately" in github
+    assert 'codex plugin marketplace add "$marketplace_root"' in github
+    assert "validate_plugin.py \\\n" not in releasing
+    assert "claude plugin validate /path/to/export-dry-run-clone --strict" in local
+    assert local.index("4. Commit") < local.index("scripts/export_public.py --dry-run")

@@ -272,14 +272,19 @@ def test_workshop_dependency_monitoring_covers_uv_and_ci_audit() -> None:
 def test_public_docs_explain_codex_openrouter_environment_and_restart() -> None:
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     codex_install = readme.split("**Codex:**", 1)[1].split("## Design", 1)[0]
+    environment_setup = readme.split("**Claude Code:**", 1)[1].split("**Codex:**", 1)[0]
 
     assert "Codex CLI" in codex_install
     assert "ChatGPT desktop app" in codex_install
-    assert "source ~/.zshrc.local" in codex_install
-    assert 'launchctl setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"' in codex_install
-    assert "launchctl unsetenv OPENROUTER_API_KEY" in codex_install
-    assert "subsequently launched application" in codex_install
-    assert "current macOS login session" in codex_install
+    assert "same environment-delivery steps shown for Claude Code" in codex_install
+    assert "optional Keychain setup" in codex_install
+    assert "source ~/.zshrc.local" in environment_setup
+    assert (
+        'launchctl setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"' in environment_setup
+    )
+    assert "launchctl unsetenv OPENROUTER_API_KEY" in environment_setup
+    assert "subsequently launched application" in environment_setup
+    assert "current macOS login" in " ".join(environment_setup.split())
     assert "desktop app with a minimal `PATH`" in codex_install
     assert "`~/.local/bin`" in codex_install
     assert "`/opt/homebrew/bin`" in codex_install
@@ -352,6 +357,8 @@ def test_public_docs_explain_managed_opencode_configuration() -> None:
 
     assert "does not load your personal OpenCode configuration" in flat
     assert "`OPENROUTER_API_KEY`" in section
+    assert "code-quorum-openrouter" in section
+    assert '/usr/bin/security add-generic-password -U -a "$(id -un)"' in section
     assert f"`{OPENCODE_DEFAULT_MODEL}`" in section
     assert f"`{OPENROUTER_CHUNK_TIMEOUT_MS}` milliseconds" in section
     assert "`OPENCODE_DISABLE_PROJECT_CONFIG=1`" in section

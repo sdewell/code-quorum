@@ -112,7 +112,7 @@ described in [SECURITY.md](SECURITY.md).
 |---|---|---|---|
 | codex | [`codex`](https://developers.openai.com/codex/cli) | the CLI's own login (`codex login`; `--with-api-key` for metered use) | ChatGPT subscription or metered API key |
 | gemini | [`agy`](https://antigravity.google/docs/cli/install/) | Google OAuth via `agy` | Google AI subscription; metered `GEMINI_API_KEY` is an explicit SDK opt-in |
-| opencode | [`opencode`](https://opencode.ai/docs/) | `OPENROUTER_API_KEY` in the environment | metered through OpenRouter |
+| opencode | [`opencode`](https://opencode.ai/docs/) | `OPENROUTER_API_KEY` or optional macOS Keychain item | metered through OpenRouter |
 | claude (Codex host only) | [`claude`](https://code.claude.com/docs/en/setup) | the CLI's own claude.ai login | Claude subscription only; API-key routing is stripped |
 
 The Gemini seat depends on the macOS Seatbelt sandbox; Claude uses a read-tool
@@ -216,9 +216,9 @@ uv run quorum setup-models --seat codex --model gpt-5.6-terra --effort medium
 
 ### OpenCode configuration
 
-The OpenCode seat requires `OPENROUTER_API_KEY` and does not load your personal
-OpenCode configuration. It uses an isolated HOME and rebuilds this generated
-configuration before every run. The shipped model is
+The OpenCode seat does not load your personal OpenCode configuration. It uses
+an isolated HOME and rebuilds this generated configuration before every run.
+The shipped model is
 `openrouter/deepseek/deepseek-v4.1-flash`, routed only to the Novita and
 Parasail backends (fp8) with OpenRouter `reasoning.effort` set to `high`; its
 OpenRouter `chunkTimeout` is `90000` milliseconds, and
@@ -237,6 +237,16 @@ which OpenRouter backend served each request in
 [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY.md](SECURITY.md) for the full
 boundary design.
 
+Environment keys win. Both hosts support this optional macOS Keychain item:
+
+```bash
+/usr/bin/security add-generic-password -U -a "$(id -un)" \
+  -s code-quorum-openrouter -w
+```
+
+Enter the key at the prompt. OpenCode uses this item when
+`OPENROUTER_API_KEY` is absent or blank. Failed lookups report setup instructions.
+
 ### Disabling a seat
 
 If a live probe fails because a seat is absent or logged out,
@@ -253,16 +263,15 @@ are skipped by the default roster and reported by `doctor`, but an explicit
 /plugin install code-quorum@code-quorum
 ```
 
-For the Claude Code CLI, load `OPENROUTER_API_KEY` and optional research keys
-before starting the host. For example:
+For the Claude Code CLI environment route, load keys before starting the host:
 
 ```bash
 source ~/.zshrc.local
 claude
 ```
 
-For the Claude desktop app, make the keys available to the current macOS login
-session before opening it:
+For the Claude desktop app environment route, set keys in the current macOS
+login session before opening it:
 
 ```bash
 source ~/.zshrc.local
@@ -329,21 +338,8 @@ The generated launcher recovers standard user and Homebrew binary directories
 (`~/.local/bin`, `~/.opencode/bin`, `/opt/homebrew/bin`, and `/usr/local/bin`)
 for a desktop app with a minimal `PATH`.
 
-For Codex CLI, source the key environment before launching Codex. For the
-ChatGPT desktop app, set keys in the current macOS login session:
-
-```bash
-source ~/.zshrc.local
-launchctl setenv OPENROUTER_API_KEY "$OPENROUTER_API_KEY"
-```
-
-The value is visible to every subsequently launched application until it is
-removed. Start Codex, then remove the login-session copy; the running app keeps
-the value it already inherited:
-
-```bash
-launchctl unsetenv OPENROUTER_API_KEY
-```
+For Codex CLI and the ChatGPT desktop app, use the optional Keychain setup
+above or the same environment-delivery steps shown for Claude Code.
 
 After a plugin upgrade or key change, fully quit and reopen Codex and start a
 brand-new Codex thread. Do not resume a thread created before the restart; its
