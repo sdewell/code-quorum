@@ -114,6 +114,7 @@ Emit, in this order:
    - **REPRO** is `confirmed` (you ran the recipe on this machine and observed the failure), `unconfirmed` (a recipe was given but you did not or could not run it), or `none`. A `critical` or `high` finding whose REPRO is not `confirmed` is downgraded to `low` before it can influence the verdict. A seat's recipe is a claim; only your run is evidence.
    - **SEVERITY** is one of `critical` / `high` / `medium` / `low`, after the REPRO downgrade above.
    - **flagged-by** is the convergence count, `N of M` agents (count your own review as a separate signal, not one of the M agents).
+   - A seat whose Council line reads `⚠ did not read the target` did not see the change (its reply starts with `UNREADABLE TARGET:`, or says the revision is unreachable). Treat each of its findings as REPRO `none`, exclude it from `flagged-by` counts, and say so in the verdict.
 
 If agreement is low (most findings flagged by only 1 of M, or agents disagree on whether something is a finding at all), **recommend an `--extended` re-run** so the council spends more rounds converging.
 

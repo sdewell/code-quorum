@@ -162,6 +162,33 @@ MAX_ROUNDS = 4
 REVIEW_DIFF_MAX_BYTES = PLAN_FILE_MAX_BYTES
 SCOPE_FILE_MAX_BYTES = PLAN_FILE_MAX_BYTES
 OUT_OF_SCOPE_TAG = "[OUT-OF-SCOPE]"
+# First-line marker a review seat emits when it could not read the change or the
+# working directory; format_liveness turns it into UNREAD_TARGET_STATUS.
+UNREADABLE_TARGET_MARKER = "UNREADABLE TARGET:"
+UNREAD_TARGET_STATUS = "⚠ did not read the target"
+# Host-injected diagnostics (quorum/agents/gemini_cli.py) that precede a seat's
+# own text.
+_HOST_DIAGNOSTIC_PREFIXES = ("[agy verification warning:", "[routing unverified:")
+# A seat's self-report lives in its preamble: the opening non-blank seat lines
+# before the findings table, and at most this many of them.
+_UNREAD_TARGET_WINDOW = 5
+_FINDINGS_LINE_PREFIXES = (
+    "file:",
+    "severity:",
+    "finding:",
+    "recommendation:",
+    "repro:",
+    "held ",
+)
+_MARKDOWN_LEAD = "#*>-`_ \t"
+# Conservative fallback for a seat that says so in prose without the marker.
+# Phrases from a real transcript; keep this list short and specific.
+_UNREAD_TARGET_PHRASES = (
+    "revision is unreachable",
+    "not readable from this host",
+    "branch code unreadable",
+    "cannot read the reviewed revision",
+)
 
 # Fallback for REVIEW_PROMPT's {scope} slot when no --scope doc is supplied.
 # A coherent instruction rather than a bare note, so the Scope paragraph above
@@ -192,6 +219,13 @@ REVIEW_PROMPT = (
     "\n"
     "A critical or high severity requires a REPRO the host can run; a finding "
     "without one must be reported as low.\n"
+    "\n"
+    "If you cannot read the change under review or the working directory "
+    "(reads denied, the revision is unreachable, no tool that can show it), "
+    f"make the first line of your reply exactly `{UNREADABLE_TARGET_MARKER} "
+    "<what you could not read, and why>` and then report only what you could "
+    "verify. Never report a finding about code you did not read as if you had "
+    "read it.\n"
     "\n"
     "Scope: apply your stance to the in-scope surface described below. If you "
     "spot something the scope declares out-of-scope or an accepted risk, note "
@@ -852,7 +886,9 @@ def format_liveness(
     the order and primary stance (a member that fails round 1 is dropped from
     later rounds but still appears here); durations sum across rounds.
     `✓` = produced output every round; `⚠ returned nothing` = exit 0 but empty
-    in some round; `unavailable (...)` = an expected auth, quota, install, or
+    in some round; `⚠ did not read the target` = round-1 output says the seat
+    could not read the reviewed revision (marker or known phrase in its preamble);
+    `unavailable (...)` = an expected auth, quota, install, or
     timeout condition; `✗ exit N` = another execution error in some round.
 
     `skipped` names default-roster seats that never ran because they're
@@ -894,6 +930,8 @@ def format_liveness(
             status = _liveness_error_status(errored)
         elif any(not r.output.strip() for r in results):
             status = "⚠ returned nothing"
+        elif _did_not_read_target(results[0].output):  # results[0] is round 1
+            status = UNREAD_TARGET_STATUS
         else:
             status = "✓"
         # Lead with the stance that actually ran because peer anonymity inside
@@ -904,6 +942,31 @@ def format_liveness(
     for s in skipped or []:
         parts.append(f"{s} (disabled, skipped)")
     return "Council: " + " · ".join(parts)
+
+
+def _did_not_read_target(output: str) -> bool:
+    """True when a seat's preamble says it could not read the reviewed change:
+    a line starting with UNREADABLE_TARGET_MARKER (markdown lead tokens and case
+    ignored) or carrying one of _UNREAD_TARGET_PHRASES. Only the preamble
+    counts -- the opening _UNREAD_TARGET_WINDOW non-blank seat lines, stopping
+    at the first findings-table line -- so a finding or a peer rebuttal that
+    quotes a phrase is never read as a self-report. Host-injected diagnostic
+    lines are skipped, not counted."""
+    marker = UNREADABLE_TARGET_MARKER.casefold()
+    seen = 0
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(_HOST_DIAGNOSTIC_PREFIXES):
+            continue
+        norm = line.lstrip(_MARKDOWN_LEAD).casefold()
+        if norm.startswith(_FINDINGS_LINE_PREFIXES):
+            return False
+        if norm.startswith(marker) or any(p in norm for p in _UNREAD_TARGET_PHRASES):
+            return True
+        seen += 1
+        if seen >= _UNREAD_TARGET_WINDOW:
+            return False
+    return False
 
 
 def _liveness_error_status(result: AgentResult) -> str:

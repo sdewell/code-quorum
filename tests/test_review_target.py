@@ -20,6 +20,7 @@ from quorum.orchestration import (
     SCOPE_FILE_MAX_BYTES,
     TREE_DIVERGES_MARKER,
     TREE_UNVERIFIED_MARKER,
+    UNREADABLE_TARGET_MARKER,
     read_scope_file,
     resolve_doc_path,
     resolve_review_target,
@@ -92,6 +93,8 @@ def test_review_prompt_has_format_slots_and_labels() -> None:
         assert sev in rendered
     # the out-of-scope tagging instruction references the shared constant
     assert OUT_OF_SCOPE_TAG in rendered
+    # the unreadable-target instruction renders the shared marker
+    assert UNREADABLE_TARGET_MARKER in rendered
 
 
 # --------------------------------------------------------------------------- #

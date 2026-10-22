@@ -12,6 +12,8 @@ from quorum.orchestration import (
     MAX_ERROR_TAIL_CHARS,
     OUTPUT_DISCIPLINE,
     TERSE_CAPS,
+    UNREAD_TARGET_STATUS,
+    UNREADABLE_TARGET_MARKER,
     append_grounding,
     append_prior_ideas,
     format_liveness,
@@ -827,6 +829,86 @@ def test_format_liveness_never_classifies_from_unstructured_error_text() -> None
     ]
 
     assert "skeptic (codex) ✗ exit 1" in format_liveness(rounds)
+
+
+def _unread_rounds(output: str, returncode: int = 0) -> list[list[AgentResult]]:
+    return [
+        [
+            AgentResult(
+                agent="gemini",
+                output=output,
+                error="",
+                returncode=returncode,
+                duration_s=0.1,
+                role="skeptic",
+            )
+        ]
+    ]
+
+
+def test_format_liveness_marker_first_line_is_did_not_read_target() -> None:
+    out = f"{UNREADABLE_TARGET_MARKER} reads denied outside root\nnothing verified"
+    line = format_liveness(_unread_rounds(out))
+    assert "⚠ did not read the target" in line
+    assert UNREAD_TARGET_STATUS == "⚠ did not read the target"
+    assert "✓" not in line
+
+
+def test_format_liveness_observed_unreachable_phrasing_without_marker() -> None:
+    out = (
+        "I've confirmed the reviewed revision is unreachable: the branch worktree "
+        "is outside my allowed root (reads denied), and I have no git/shell tool "
+        "to run `git show`."
+    )
+    line = format_liveness(_unread_rounds(out))
+    assert "⚠ did not read the target" in line
+    assert "✓" not in line
+
+
+def test_format_liveness_finding_quoting_a_phrase_stays_ok() -> None:
+    out = (
+        "FILE: parser.py:12\n"
+        "FINDING: The error text says cannot read the reviewed revision."
+    )
+    line = format_liveness(_unread_rounds(out))
+    assert "skeptic (gemini) ✓" in line
+    assert "did not read" not in line
+
+
+def test_format_liveness_host_prefix_and_markdown_marker_is_detected() -> None:
+    out = "[agy verification warning: drift]\n\n**UNREADABLE TARGET:** reads denied"
+    assert "⚠ did not read the target" in format_liveness(_unread_rounds(out))
+
+
+def test_format_liveness_round2_quoted_phrase_does_not_taint_seat() -> None:
+    def res(output: str) -> AgentResult:
+        return AgentResult(
+            agent="gemini",
+            output=output,
+            error="",
+            returncode=0,
+            duration_s=0.1,
+            role="skeptic",
+        )
+
+    rounds = [
+        [res("FILE: a.py:1\nFINDING: bug")],
+        [
+            res(
+                "Pushing back on peer: the claim that the reviewed revision is "
+                "unreachable is false.\nHELD a.py:1 | low | bug"
+            )
+        ],
+    ]
+    line = format_liveness(rounds)
+    assert "skeptic (gemini) ✓" in line
+
+
+def test_format_liveness_error_status_beats_unread_target() -> None:
+    out = f"{UNREADABLE_TARGET_MARKER} nope"
+    line = format_liveness(_unread_rounds(out, returncode=1))
+    assert "✗ exit 1" in line
+    assert "did not read" not in line
 
 
 # --- output budget (terse-by-default; --verbose stays regulated) ---

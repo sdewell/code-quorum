@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from pathlib import Path
 from typing import cast
 
@@ -714,6 +715,30 @@ async def test_prune_npm_cache_runs_verify_when_over_threshold(
 
 
 @pytest.mark.asyncio
+async def test_prune_npm_cache_walks_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The cache-size walk (os.walk + stat per file) must not run on the loop
+    # thread, or it stalls every concurrent seat.
+    _make_npm_cache(tmp_path, size_bytes=200)
+    walk_threads: list[int] = []
+
+    def _fake_size(path: Path) -> int:
+        walk_threads.append(threading.get_ident())
+        return 10**9
+
+    async def _spawn(*cmd: str, **kwargs: object) -> _FakeVerifyProc:
+        return _FakeVerifyProc()
+
+    monkeypatch.setattr(opencode_mod, "_dir_size_bytes", _fake_size)
+    monkeypatch.setattr(opencode_mod.asyncio, "create_subprocess_exec", _spawn)
+    loop_thread = threading.get_ident()
+    assert await _prune_npm_cache(tmp_path, threshold=100) is True
+    assert walk_threads
+    assert all(ident != loop_thread for ident in walk_threads)
+
+
+@pytest.mark.asyncio
 async def test_prune_npm_cache_swallows_missing_npm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1023,6 +1048,33 @@ async def test_opencode_run_repairs_and_prunes_existing_debug_dir(
         len(list(debug_dir.glob("opencode-*.txt")))
         == opencode_mod.OPENCODE_DEBUG_MAX_FILES
     )
+
+
+@pytest.mark.asyncio
+async def test_opencode_run_captures_debug_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # _maybe_capture_debug does mkdir + write_text; it must not run on the
+    # loop thread, or it stalls every concurrent seat.
+    capture_threads: list[int] = []
+
+    def _fake_capture(**kwargs: object) -> None:
+        capture_threads.append(threading.get_ident())
+
+    async def _success(
+        proc: object, *, pgid: int, idle_timeout: float
+    ) -> tuple[bytes, bytes, bool]:
+        return (b'{"type":"text","part":{"text":"ok"}}\n', b"", False)
+
+    _patch_opencode_run_seams(monkeypatch, tmp_path, _success)
+    monkeypatch.setattr(opencode_mod, "_maybe_capture_debug", _fake_capture)
+    loop_thread = threading.get_ident()
+
+    result = await OpenCodeAgent().run(prompt="x", cwd="/tmp")
+
+    assert result.returncode == 0
+    assert capture_threads
+    assert all(ident != loop_thread for ident in capture_threads)
 
 
 @pytest.mark.asyncio

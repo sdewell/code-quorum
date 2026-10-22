@@ -510,10 +510,10 @@ async def _prune_npm_cache(
     error) is logged and swallowed so a prune can never break a council run.
     Returns True iff verify was invoked (see _NPM_CACHE_PRUNE_THRESHOLD_BYTES
     for why this is needed at all)."""
-    if not _npm_cache_needs_prune(sandbox, threshold):
+    if not await asyncio.to_thread(_npm_cache_needs_prune, sandbox, threshold):
         return False
     npm_cache = sandbox / ".npm"
-    before = _dir_size_bytes(npm_cache)
+    before = await asyncio.to_thread(_dir_size_bytes, npm_cache)
     env = allowlisted_seat_subprocess_env()
     env["HOME"] = str(sandbox)
     try:
@@ -533,7 +533,7 @@ async def _prune_npm_cache(
     except OSError as exc:
         logger.warning("opencode npm-cache prune skipped (npm unavailable): %s", exc)
         return False
-    reclaimed = before - _dir_size_bytes(npm_cache)
+    reclaimed = before - await asyncio.to_thread(_dir_size_bytes, npm_cache)
     if proc.returncode != 0:
         logger.warning(
             "opencode npm-cache prune: `npm cache verify` exited %s; "
@@ -1108,7 +1108,8 @@ class OpenCodeAgent(Agent):
         # 0, no text) renders as a silent blank at the orchestrator and gets the
         # agent dropped from later rounds; the raw stdout is the only artifact
         # that explains why. Best-effort -- never lets instrumentation break run.
-        _maybe_capture_debug(
+        await asyncio.to_thread(
+            _maybe_capture_debug,
             cmd=cmd,
             model=self.model,
             cwd=cwd,

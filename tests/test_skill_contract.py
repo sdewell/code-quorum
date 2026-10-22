@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from quorum.orchestration import OUT_OF_SCOPE_TAG, select_agents
+from quorum.orchestration import (
+    OUT_OF_SCOPE_TAG,
+    UNREAD_TARGET_STATUS,
+    UNREADABLE_TARGET_MARKER,
+    select_agents,
+)
 from quorum_mcp.server import q_await
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
@@ -264,6 +269,15 @@ def test_q_review_skill_uses_out_of_scope_tag_literal() -> None:
     string, so the literal must match the Python constant verbatim — a
     drift here means Claude looks for the wrong marker."""
     assert OUT_OF_SCOPE_TAG in _skill("q-review")
+
+
+def test_q_review_skill_names_the_unread_target_marker_and_status() -> None:
+    """The host must discount a seat whose Council line says it did not read
+    the target, so the SKILL must carry the exact marker and status strings."""
+    skill = _skill("q-review")
+    assert UNREADABLE_TARGET_MARKER in skill
+    assert UNREAD_TARGET_STATUS in skill
+    assert "⚠ did not read the target" in skill
 
 
 def test_q_review_skill_and_scope_template_carry_the_repro_gate() -> None:

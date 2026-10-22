@@ -109,6 +109,10 @@ class HFModel:
     url: str
     # Same escalation marker as Repo.broadened.
     broadened: bool = False
+    # Model-card tags and README text (full-text hits); used for lexical grading
+    # only, never rendered.
+    tags: tuple[str, ...] = ()
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -1423,6 +1427,8 @@ def _gh_quote(term: str) -> str:
 
 _GITHUB_URL = "https://api.github.com/search/repositories"
 _HF_MODELS_URL = "https://huggingface.co/api/models"
+_HF_FULLTEXT_URL = "https://huggingface.co/api/search/full-text"
+_HF_DESCRIPTION_CAP = 600
 
 
 def _is_rate_error(exc: httpx.HTTPError) -> bool:
@@ -1435,6 +1441,13 @@ def _is_rate_error(exc: httpx.HTTPError) -> bool:
 
 
 _T = TypeVar("_T")
+
+
+class _UnionErrors(list):
+    """Errors from one `_search_union` fan-out, plus how many sub-queries were
+    actually issued (a 429 stops the fan-out early)."""
+
+    attempted: int = 0
 
 
 async def _search_union(
@@ -1460,8 +1473,9 @@ async def _search_union(
     so it can tag every resulting item (set by the caller for an escalation
     call, never for the precise query)."""
     found: dict[str, _T] = {}
-    errors: list[httpx.HTTPError] = []
-    for sub in sub_queries:
+    errors = _UnionErrors()
+    errors.attempted = len(sub_queries)
+    for index, sub in enumerate(sub_queries):
         try:
             resp = await client.get(
                 url, params=params(sub), headers=headers, timeout=timeout
@@ -1470,6 +1484,7 @@ async def _search_union(
         except httpx.HTTPError as exc:
             errors.append(exc)
             if _is_rate_error(exc):
+                errors.attempted = index + 1
                 break
             continue
         for item in items_of(resp):
@@ -1481,6 +1496,13 @@ async def _search_union(
                 continue
             found[key] = obj
     return found, errors
+
+
+class _PartialUnion(list):
+    """A union result some of whose sub-queries failed; `note` says so and the
+    digest builder lifts it into `digest.notes` (same shape as `_ServedPapers`)."""
+
+    note: str = ""
 
 
 async def _escalate_union(
@@ -1527,14 +1549,30 @@ async def _escalate_union(
     if errors and not found:
         raise errors[0]
     if escalation_terms:
-        return sorted(
+        ranked = sorted(
             found.values(),
             key=lambda x: (
                 -_term_match_count(escalation_terms, match_text(x)),
                 -popularity(x),
             ),
         )[:limit]
-    return sorted(found.values(), key=popularity, reverse=True)[:limit]
+    else:
+        ranked = sorted(found.values(), key=popularity, reverse=True)[:limit]
+    if not errors:
+        return ranked
+    # Some sub-queries failed but others produced hits: return the hits, and
+    # say the coverage is partial instead of dropping the failures silently.
+    issued = len(escalation_terms) if escalation_terms else len(sub_queries)
+    kind = "rate-limited" if any(_is_rate_error(e) for e in errors) else "errored"
+    attempted = getattr(errors, "attempted", issued)
+    skipped = issued - attempted
+    not_issued = f", {skipped} not issued" if skipped > 0 else ""
+    partial = _PartialUnion(ranked)
+    partial.note = (
+        f"{len(errors)} of {issued} sub-queries failed ({kind}){not_issued}; "
+        "coverage is partial"
+    )
+    return partial
 
 
 def _gh_parse(item: dict, broadened: bool) -> tuple[str, Repo] | None:
@@ -1624,6 +1662,12 @@ def _hf_parse(item: dict, broadened: bool) -> tuple[str, HFModel] | None:
     mid = (item.get("id") or item.get("modelId") or "").strip()
     if not mid:
         return None
+    raw_tags = item.get("tags")
+    tags = (
+        tuple(t for t in raw_tags if isinstance(t, str))
+        if isinstance(raw_tags, list)
+        else ()
+    )
     return mid, HFModel(
         id=mid,
         downloads=int(item.get("downloads") or 0),
@@ -1632,7 +1676,97 @@ def _hf_parse(item: dict, broadened: bool) -> tuple[str, HFModel] | None:
         library_name=item.get("library_name") or None,
         url=f"https://huggingface.co/{mid}",
         broadened=broadened,
+        tags=tags,
     )
+
+
+def _hf_fulltext_parse(hit: dict, broadened: bool) -> tuple[str, HFModel] | None:
+    """Parse one `/api/search/full-text` hit. It carries no download count
+    (left 0 until `_hf_enrich`), a comma-joined tag string, and README
+    fragments, which become the grading-only `description`."""
+    if not isinstance(hit, dict) or hit.get("isPrivate"):
+        return None
+    name = hit.get("name")
+    mid = name.strip() if isinstance(name, str) else ""
+    if not mid:
+        return None
+    likes = hit.get("likes")
+    raw_tags = hit.get("tags")
+    tags = (
+        tuple(t.strip() for t in raw_tags.split(",") if t.strip())
+        if isinstance(raw_tags, str)
+        else ()
+    )
+    formatted = hit.get("formatted")
+    fragments = formatted.get("fileContent") if isinstance(formatted, dict) else None
+    pieces = [
+        f["text"]
+        for f in (fragments if isinstance(fragments, list) else [])
+        if isinstance(f, dict) and isinstance(f.get("text"), str)
+    ]
+    description = " ".join(" ".join(pieces).split())[:_HF_DESCRIPTION_CAP]
+    return mid, HFModel(
+        id=mid,
+        downloads=0,
+        likes=likes if isinstance(likes, int) else 0,
+        pipeline_tag=None,
+        library_name=None,
+        url=f"https://huggingface.co/{mid}",
+        broadened=False,
+        tags=tags,
+        description=description,
+    )
+
+
+def _hf_match_text(m: HFModel) -> str:
+    return " ".join((m.id, *m.tags, m.description))
+
+
+async def _hf_enrich(
+    client: httpx.AsyncClient,
+    candidates: list[HFModel],
+    *,
+    timeout: float,
+    headers: dict[str, str],
+) -> dict[str, HFModel | None]:
+    """Fetch per-model metadata for full-text-only hits. Best effort: any
+    failure leaves that candidate as it was."""
+
+    async def one(m: HFModel) -> HFModel:
+        resp = await client.get(
+            f"{_HF_MODELS_URL}/{m.id}", headers=headers, timeout=timeout
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        if not isinstance(body, dict):
+            return m
+        if body.get("private"):
+            raise ValueError("private model")
+        tags = body.get("tags")
+        return replace(
+            m,
+            downloads=int(body.get("downloads") or 0),
+            likes=int(body.get("likes") or m.likes),
+            pipeline_tag=body.get("pipeline_tag") or m.pipeline_tag,
+            library_name=body.get("library_name") or m.library_name,
+            tags=m.tags
+            or (
+                tuple(t for t in tags if isinstance(t, str))
+                if isinstance(tags, list)
+                else ()
+            ),
+        )
+
+    results = await asyncio.gather(
+        *(one(m) for m in candidates), return_exceptions=True
+    )
+    out: dict[str, HFModel | None] = {}
+    for m, res in zip(candidates, results, strict=True):
+        if isinstance(res, HFModel):
+            out[m.id] = res
+        elif isinstance(res, ValueError) and str(res) == "private model":
+            out[m.id] = None
+    return out
 
 
 async def search_huggingface(
@@ -1676,8 +1810,9 @@ async def search_huggingface(
         timeout=timeout,
         headers=headers,
     )
+    pool = max(limit * 3, 15)
     found, errors = await run_union(terms)
-    return await _escalate_union(
+    ranked = await _escalate_union(
         query,
         distinctive,
         terms,
@@ -1685,10 +1820,63 @@ async def search_huggingface(
         errors,
         run_union,
         quote=lambda t: t,
-        match_text=lambda m: m.id,
+        match_text=_hf_match_text,
         popularity=lambda m: m.downloads,
-        limit=limit,
+        limit=pool,
     )
+    # Full-text query, isolated from the substring union: its failure is
+    # swallowed so the id results stand, and its hits never gate escalation.
+    fulltext_hits: list[HFModel] = []
+    try:
+        resp = await client.get(
+            _HF_FULLTEXT_URL,
+            params={"q": query, "type": "model", "limit": pool},
+            headers=headers,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+    except (httpx.HTTPError, ValueError):
+        body = None
+    hits = body.get("hits") if isinstance(body, dict) else None
+    for hit in hits if isinstance(hits, list) else []:
+        parsed = _hf_fulltext_parse(hit, False)
+        if parsed is not None:
+            fulltext_hits.append(parsed[1])
+    by_id = {m.id: m for m in ranked}
+    fulltext_only: set[str] = set()
+    for ft in fulltext_hits:
+        old = by_id.get(ft.id)
+        if old is None:
+            by_id[ft.id] = ft
+            fulltext_only.add(ft.id)
+        else:
+            by_id[ft.id] = replace(
+                old, tags=old.tags or ft.tags, description=ft.description
+            )
+    candidates = list(by_id.values())
+    scorable = set(_scorable_terms(query))
+
+    def matches(m: HFModel) -> int:
+        return len(_match_tokens(_hf_match_text(m)) & scorable)
+
+    kept = [m for m in candidates if not scorable or matches(m) > 0]
+    # Enrich only hits whose download count is unknown (full-text-only).
+    pending = sorted(
+        (m for m in kept if m.id in fulltext_only),
+        key=lambda m: (-matches(m), -m.likes),
+    )[: 2 * limit]
+    enriched = await _hf_enrich(client, pending, timeout=timeout, headers=headers)
+    final: list[HFModel] = []
+    for m in kept:
+        if m.id in enriched:
+            m = enriched[m.id]
+            if m is None:  # detail said private
+                continue
+        final.append(m)
+    final.sort(key=lambda m: (-matches(m), -m.downloads, -m.likes, m.id))
+    ranked[:] = final[:limit]
+    return ranked
 
 
 # Query-quality scoring (Layer 3). Stopwords cover articles/prepositions PLUS
@@ -1833,7 +2021,7 @@ def _candidate_is_on_topic(
     elif isinstance(candidate, Repo):
         text = f"{candidate.name} {candidate.description}"
     else:
-        text = candidate.id
+        text = _hf_match_text(candidate)
     return len(_match_tokens(text) & terms) >= _required_matches(len(terms))
 
 
@@ -1879,7 +2067,7 @@ def _scoreable_texts(papers: Iterable[Paper], query: str) -> list[str]:
 
 
 def _scoreable_artifact_texts(
-    items: Iterable[LibraryDoc | Repo], query: str
+    items: Iterable[LibraryDoc | Repo | HFModel], query: str
 ) -> list[str]:
     """Keep artifact metadata that can support a lexical verdict.
 
@@ -1894,6 +2082,9 @@ def _scoreable_artifact_texts(
         if isinstance(item, LibraryDoc):
             supporting = " ".join((item.description, *item.snippets)).strip()
             name = item.name
+        elif isinstance(item, HFModel):
+            supporting = " ".join((*item.tags, item.description)).strip()
+            name = item.id
         else:
             supporting = item.description.strip()
             name = item.name
@@ -2022,15 +2213,6 @@ def _source_lane_status(
             f"only {count} candidate(s); too few for a relevance verdict",
             count,
         )
-    if value and isinstance(value[0], HFModel):
-        return SourceLaneStatus(
-            source,
-            lane,
-            query,
-            "THIN",
-            "model identifiers lack enough descriptive text for lexical grading",
-            count,
-        )
     exact_papers: list[Paper] | None = None
     if value and isinstance(value[0], Paper):
         exact_papers = [
@@ -2039,7 +2221,7 @@ def _source_lane_status(
         texts = _scoreable_texts(exact_papers, query)
     elif value and isinstance(value[0], LibraryDoc):
         texts = _scoreable_artifact_texts(value, query)
-    elif value and isinstance(value[0], Repo):
+    elif value and isinstance(value[0], (Repo, HFModel)):
         texts = _scoreable_artifact_texts(value, query)
     else:
         texts = []

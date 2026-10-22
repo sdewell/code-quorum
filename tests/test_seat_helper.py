@@ -683,3 +683,267 @@ def test_codex_helper_preserves_recorded_gemini_routing_metadata() -> None:
     assert isinstance(seat, sh.SeatHelperAgent)
     assert seat.model_source == "recorded"
     assert seat.recorded_cli_version == "1.1.12"
+
+
+# --- #125 hardening: timeout cap, effort check, inflight cap, cancel, grace ---
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(10_000, 900.0), ("abc", 600.0), (-1, 600.0), (30, 30.0), (None, 600.0)],
+)
+def test_effective_timeout_caps_and_defaults(raw: object, expected: float) -> None:
+    assert sh._effective_timeout_s(raw) == expected
+
+
+def test_helper_timeout_cap_mirrors_council_agent_timeout() -> None:
+    # seat_helper cannot import quorum.council (cycle via quorum.agents), so
+    # the cap is a mirrored constant; this pins the two together.
+    from quorum.council import AGENT_TIMEOUT_S
+
+    assert sh.HELPER_MAX_TIMEOUT_S == AGENT_TIMEOUT_S
+
+
+def test_helper_rejects_invalid_claude_effort_without_building_agent(
+    monkeypatch, tmp_path: Path
+) -> None:
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("ClaudeAgent must not be constructed")
+
+    monkeypatch.setattr(sh, "ClaudeAgent", _boom)
+    result = asyncio.run(
+        sh._run_request(
+            {
+                "operation": "run",
+                "seat": "claude",
+                "cwd": str(tmp_path),
+                "prompt": "p",
+                "effort": "turbo",
+            },
+            allowed_roots=(tmp_path.resolve(),),
+        )
+    )
+
+    assert result.returncode == 1
+    assert result.unavailable_reason == "seat helper"
+    assert result.error == (
+        "seat helper request effort 'turbo' is not one of high, low, max, medium, xhigh"
+    )
+
+
+def _write_request(spool: Path, request_id: str) -> Path:
+    path = spool / "requests" / f"{request_id}.json"
+    sh._atomic_write_json(
+        path,
+        {
+            "id": request_id,
+            "operation": "run",
+            "seat": "claude",
+            "cwd": "/",
+            "prompt": "p",
+        },
+    )
+    return path
+
+
+def test_process_one_request_limiter_bounds_concurrent_runs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    spool = tmp_path / "spool"
+    sh._ensure_spool(spool)
+    state = {"now": 0, "peak": 0}
+
+    async def _fake_run_request(payload, **_kwargs):
+        state["now"] += 1
+        state["peak"] = max(state["peak"], state["now"])
+        await asyncio.sleep(0.05)
+        state["now"] -= 1
+        return AgentResult(agent="claude", output="ok")
+
+    monkeypatch.setattr(sh, "_run_request", _fake_run_request)
+
+    async def _drive(capacity: int, ids: list[str]) -> int:
+        state.update(now=0, peak=0)
+        limiter = asyncio.Semaphore(capacity)
+        paths = [_write_request(spool, rid) for rid in ids]
+        await asyncio.gather(
+            *(
+                sh._process_one_request(
+                    p, spool, allowed_roots=(tmp_path,), limiter=limiter
+                )
+                for p in paths
+            )
+        )
+        return state["peak"]
+
+    assert asyncio.run(_drive(1, [c * 32 for c in "abc"])) == 1
+    assert asyncio.run(_drive(3, [c * 32 for c in "def"])) == 3
+
+
+def test_serve_helper_inflight_cap_is_eight() -> None:
+    assert sh.HELPER_MAX_INFLIGHT == 8
+
+
+def test_ensure_spool_creates_cancel_directory(tmp_path: Path) -> None:
+    sh._ensure_spool(tmp_path / "spool")
+    assert (tmp_path / "spool" / "cancel").is_dir()
+
+
+def test_client_timeout_after_claim_leaves_cancel_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sh, "helper_compatibility_error", lambda _spool: None)
+    monkeypatch.setattr(sh, "_HELPER_CLIENT_MARGIN_S", 0.0)
+    spool = tmp_path / "spool"
+
+    async def _run() -> AgentResult:
+        async def _claim_and_ignore() -> None:
+            requests = spool / "requests"
+            while True:
+                for req in requests.glob("*.json"):
+                    os.replace(req, spool / "inflight" / req.name)
+                    return
+                await asyncio.sleep(0.005)
+
+        claimer = asyncio.create_task(_claim_and_ignore())
+        result = await sh.run_via_helper(
+            seat="claude",
+            prompt="p",
+            cwd=str(tmp_path),
+            model="sonnet",
+            timeout_s=0.2,
+            spool_dir=spool,
+            poll_interval=0.01,
+        )
+        await claimer
+        return result
+
+    result = asyncio.run(_run())
+
+    assert result.returncode == sh.HELPER_TIMEOUT_RC
+    markers = list((spool / "cancel").iterdir())
+    assert len(markers) == 1
+    inflight = list((spool / "inflight").glob("*.json"))
+    assert [m.name for m in markers] == [inflight[0].stem]
+
+
+def test_client_timeout_before_claim_removes_request_and_leaves_no_marker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sh, "helper_compatibility_error", lambda _spool: None)
+    monkeypatch.setattr(sh, "_HELPER_CLIENT_MARGIN_S", 0.0)
+    spool = tmp_path / "spool"
+    result = asyncio.run(
+        sh.run_via_helper(
+            seat="claude",
+            prompt="p",
+            cwd=str(tmp_path),
+            model="sonnet",
+            timeout_s=0.1,
+            spool_dir=spool,
+            poll_interval=0.01,
+        )
+    )
+
+    assert result.returncode == sh.HELPER_TIMEOUT_RC
+    assert list((spool / "requests").iterdir()) == []
+    assert list((spool / "cancel").iterdir()) == []
+
+
+def test_helper_cancel_marker_stops_run_and_writes_no_result(
+    monkeypatch, tmp_path: Path
+) -> None:
+    spool = tmp_path / "spool"
+    sh._ensure_spool(spool)
+    request_id = "c" * 32
+    path = _write_request(spool, request_id)
+
+    async def _slow_run_request(payload, **_kwargs):
+        await asyncio.sleep(5)
+        return AgentResult(agent="claude", output="late")
+
+    monkeypatch.setattr(sh, "_run_request", _slow_run_request)
+
+    async def _drive() -> tuple[bool, float]:
+        async def _mark() -> None:
+            await asyncio.sleep(0.05)
+            (spool / "cancel" / request_id).touch()
+
+        marker = asyncio.create_task(_mark())
+        start = time.monotonic()
+        handled = await sh._process_one_request(
+            path, spool, allowed_roots=(tmp_path,), poll_interval=0.01
+        )
+        await marker
+        return handled, time.monotonic() - start
+
+    handled, elapsed = asyncio.run(_drive())
+
+    assert handled is False
+    assert elapsed < 1.0
+    assert list((spool / "results").iterdir()) == []
+    assert list((spool / "cancel").iterdir()) == []
+    assert list((spool / "inflight").iterdir()) == []
+
+
+def test_sweep_removes_old_cancel_markers_and_keeps_fresh(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    sh._ensure_spool(spool)
+    stale = spool / "cancel" / ("a" * 32)
+    fresh = spool / "cancel" / ("b" * 32)
+    stale.touch()
+    fresh.touch()
+    now = time.time()
+    os.utime(stale, (now - sh.RESULT_TTL_S - 10, now - sh.RESULT_TTL_S - 10))
+
+    sh._sweep_stale_results(spool, now=now)
+
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+def test_seat_grace_only_for_gemini() -> None:
+    from quorum.agents.gemini_cli import (
+        AGY_STARTUP_CRASH_WINDOW_S,
+        AGY_STARTUP_RETRY_DELAY_S,
+        GEMINI_CLI_TIMEOUT_GRACE_S,
+    )
+
+    assert sh._seat_grace_s("gemini") == (
+        GEMINI_CLI_TIMEOUT_GRACE_S
+        + AGY_STARTUP_CRASH_WINDOW_S
+        + AGY_STARTUP_RETRY_DELAY_S
+        + 5.0
+    )
+    assert sh._seat_grace_s("claude") == 0.0
+
+
+def test_helper_wrapper_waits_for_gemini_agent_own_timeout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Patch the grace constant small so the test stays fast; the helper's own
+    # wait_for must still allow timeout_s + grace, not just timeout_s.
+    monkeypatch.setattr(sh, "GEMINI_CLI_TIMEOUT_GRACE_S", 0.0)
+
+    async def _agent_run(self, prompt, cwd):
+        await asyncio.sleep(0.3)
+        return AgentResult(
+            agent="gemini", output="", error="agent-own-timeout", returncode=124
+        )
+
+    monkeypatch.setattr(sh.GeminiCliAgent, "run", _agent_run)
+    result = asyncio.run(
+        sh._run_request(
+            {
+                "operation": "run",
+                "seat": "gemini",
+                "cwd": str(tmp_path),
+                "prompt": "p",
+                "timeout_s": 0.2,
+            },
+            allowed_roots=(tmp_path.resolve(),),
+        )
+    )
+
+    assert result.returncode == 124
+    assert result.error == "agent-own-timeout"

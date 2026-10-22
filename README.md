@@ -82,7 +82,7 @@ coverage without inflating the digest.
 | Europe PMC preprints (`europepmc-preprints`) | Life-sciences preprints from bioRxiv, medRxiv, Research Square, and similar sources; arXiv records are excluded. | None. |
 | Context7 (`context7`) | High-trust library matches and documentation snippets. | `CONTEXT7_API_KEY` is recommended because anonymous requests can be rate-limited. |
 | GitHub (`github`) | Public repositories matched by name, description, and topics, then ranked by stars. | `GH_TOKEN`, `GITHUB_TOKEN`, or a signed-in `gh` raises limits. Private repositories are excluded. |
-| Hugging Face (`huggingface`) | Public model IDs and metadata, ranked by downloads. Term-fallback results carry `[broadened]`. | `HF_TOKEN` or `QUORUM_HF_TOKEN` raises Hub limits. Private models are filtered out. |
+| Hugging Face (`huggingface`) | Public model IDs ranked by card-text relevance. Term-fallback results carry `[broadened]`. | `HF_TOKEN` or `QUORUM_HF_TOKEN` raises Hub limits. Private models are filtered out. |
 
 Credentials come from the environment, or `gh` for GitHub, and go out only in
 authorization headers. The generated Codex adapter forwards the named variables and does not

@@ -24,9 +24,15 @@ from .base import (
 )
 from .claude import DEFAULT_EFFORT as CLAUDE_DEFAULT_EFFORT
 from .claude import DEFAULT_MODEL as CLAUDE_DEFAULT_MODEL
+from .claude import VALID_EFFORTS as CLAUDE_VALID_EFFORTS
 from .claude import ClaudeAgent
+from .gemini_cli import (
+    AGY_STARTUP_CRASH_WINDOW_S,
+    AGY_STARTUP_RETRY_DELAY_S,
+    GEMINI_CLI_TIMEOUT_GRACE_S,
+    GeminiCliAgent,
+)
 from .gemini_cli import DEFAULT_MODEL as GEMINI_DEFAULT_MODEL
-from .gemini_cli import GeminiCliAgent
 
 HELPER_UNAVAILABLE_RC = 5
 HELPER_TIMEOUT_RC = 124
@@ -34,6 +40,15 @@ HELPER_LABEL = "com.code-quorum.seat-helper"
 HELPER_PROTOCOL_VERSION = 2
 CODEX_PLUGIN_CACHE = Path("~/.codex/plugins/cache").expanduser()
 RESULT_TTL_S = 300.0
+# Cap on a request's timeout_s. Mirrors quorum.council.AGENT_TIMEOUT_S, which
+# cannot be imported here (council imports quorum.agents, so it would cycle);
+# a test pins the two together.
+HELPER_MAX_TIMEOUT_S = 900.0
+_HELPER_DEFAULT_TIMEOUT_S = 600.0
+# Requests the helper runs at once; further claimed requests wait their turn.
+HELPER_MAX_INFLIGHT = 8
+# Client slack past the helper's own deadline before it gives up on a result.
+_HELPER_CLIENT_MARGIN_S = 30.0
 _ROOT_NAME = f"code-quorum-seat-helper-{os.getuid()}"
 _ALLOWED_ROOTS_ENV = "CODE_QUORUM_HELPER_ALLOWED_ROOTS"
 _REQUEST_ID_CHARS = frozenset("0123456789abcdef")
@@ -219,18 +234,50 @@ def cwd_allowed_error(cwd: str, roots: tuple[Path, ...]) -> str | None:
 
 def _ensure_spool(spool: Path) -> None:
     _ensure_private_dir(spool, parents=True)
-    for name in ("requests", "inflight", "results"):
+    for name in ("requests", "inflight", "results", "cancel"):
         _ensure_private_dir(spool / name, parents=False)
 
 
 def _sweep_stale_results(spool: Path, *, now: float | None = None) -> None:
     cutoff = (time.time() if now is None else now) - RESULT_TTL_S
-    for result in (spool / "results").glob("*.json"):
+    stale_candidates = [
+        *(spool / "results").glob("*.json"),
+        *(spool / "cancel").glob("*"),
+    ]
+    for entry in stale_candidates:
         try:
-            if result.stat(follow_symlinks=False).st_mtime < cutoff:
-                result.unlink()
+            if entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                entry.unlink()
         except OSError:
             continue
+
+
+def _effective_timeout_s(raw: Any) -> float:
+    """A request's timeout: non-numeric or non-positive falls back to the
+    default, anything larger than the cap is clamped to it."""
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _HELPER_DEFAULT_TIMEOUT_S
+    if not value > 0:  # also rejects NaN
+        return _HELPER_DEFAULT_TIMEOUT_S
+    return min(value, HELPER_MAX_TIMEOUT_S)
+
+
+def _seat_grace_s(seat: str) -> float:
+    """Extra time the helper allows past timeout_s so a seat's own backstop
+    fires before the helper's. For gemini the grace covers the agent's own
+    backstop plus one startup-crash retry; a quota-reflex fallback attempt (a
+    second full-length attempt) stays bounded by the helper's wrapper, by
+    design."""
+    if seat != "gemini":
+        return 0.0
+    return (
+        GEMINI_CLI_TIMEOUT_GRACE_S
+        + AGY_STARTUP_CRASH_WINDOW_S
+        + AGY_STARTUP_RETRY_DELAY_S
+        + 5.0
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -477,7 +524,9 @@ class SeatHelperAgent(Agent):
         self.effort = effort
         self.model_source = model_source
         self.recorded_cli_version = recorded_cli_version
-        self.timeout_s = timeout_s
+        # Clamp as the helper does, so the serialised timeout and the client
+        # deadline agree with what the helper will actually enforce.
+        self.timeout_s = _effective_timeout_s(timeout_s)
         self.spool_dir = spool_dir
         self.poll_interval = poll_interval
 
@@ -514,6 +563,9 @@ class SeatHelperAgent(Agent):
         spool = self.spool_dir or default_spool_dir()
         try:
             _ensure_spool(spool)
+            # Bound stray results and cancel markers even when the running
+            # helper is an older one that never sweeps `cancel/`.
+            _sweep_stale_results(spool)
         except OSError as exc:
             return AgentResult(
                 agent=self.name,
@@ -555,10 +607,14 @@ class SeatHelperAgent(Agent):
                 duration_s=time.monotonic() - start,
                 unavailable_reason="seat helper",
             )
-        deadline = start + self.timeout_s + 30.0
+        deadline = (
+            start + self.timeout_s + _seat_grace_s(self.name) + _HELPER_CLIENT_MARGIN_S
+        )
+        observed_result = False
         try:
             while time.monotonic() < deadline:
                 if result_path.exists():
+                    observed_result = True
                     try:
                         result = _result_from_payload(
                             _read_json(result_path), self.name
@@ -575,6 +631,11 @@ class SeatHelperAgent(Agent):
                     return result
                 await asyncio.sleep(self.poll_interval)
         finally:
+            if not observed_result and not request_path.exists():
+                # The helper already claimed the request, so nobody will read
+                # its result: ask it to stop the run (best effort).
+                with contextlib.suppress(OSError):
+                    (spool / "cancel" / request_id).touch()
             with contextlib.suppress(FileNotFoundError):
                 result_path.unlink()
             with contextlib.suppress(FileNotFoundError):
@@ -697,15 +758,21 @@ async def _run_request(
     recorded_cli_version = (
         str(raw_recorded_version) if raw_recorded_version is not None else None
     )
-    try:
-        timeout_s = float(payload.get("timeout_s", 600.0))
-    except (TypeError, ValueError):
-        timeout_s = 600.0
-    if timeout_s <= 0:
-        timeout_s = 600.0
+    timeout_s = _effective_timeout_s(payload.get("timeout_s", 600.0))
     agent: Agent
     if seat == "claude":
         effort = str(payload.get("effort") or CLAUDE_DEFAULT_EFFORT)
+        if effort not in CLAUDE_VALID_EFFORTS:
+            return AgentResult(
+                agent=seat,
+                output="",
+                error=(
+                    f"seat helper request effort {effort!r} is not one of "
+                    f"{', '.join(sorted(CLAUDE_VALID_EFFORTS))}"
+                ),
+                returncode=1,
+                unavailable_reason="seat helper",
+            )
         agent = ClaudeAgent(model=model, effort=effort, model_source=model_source)
     else:
         gemini_agent = GeminiCliAgent(
@@ -729,7 +796,9 @@ async def _run_request(
                 )
         agent = gemini_agent
     try:
-        return await asyncio.wait_for(agent.run(prompt, cwd), timeout=timeout_s)
+        return await asyncio.wait_for(
+            agent.run(prompt, cwd), timeout=timeout_s + _seat_grace_s(seat)
+        )
     except TimeoutError:
         return AgentResult(
             agent=seat,
@@ -747,7 +816,12 @@ def _valid_request_id(value: object) -> str | None:
 
 
 async def _process_one_request(
-    path: Path, spool: Path, *, allowed_roots: tuple[Path, ...]
+    path: Path,
+    spool: Path,
+    *,
+    allowed_roots: tuple[Path, ...],
+    limiter: asyncio.Semaphore | None = None,
+    poll_interval: float = 0.2,
 ) -> bool:
     try:
         payload = _read_json(path)
@@ -765,8 +839,30 @@ async def _process_one_request(
         os.replace(path, inflight)
     except FileNotFoundError:
         return False
+    cancel_marker = spool / "cancel" / request_id
     try:
-        result = await _run_request(payload, allowed_roots=allowed_roots)
+        # The limiter is taken after the claim above, so a request waiting
+        # for a slot is already ours and can never be picked up twice.
+        async with limiter if limiter is not None else contextlib.nullcontext():
+            task = asyncio.ensure_future(
+                _run_request(payload, allowed_roots=allowed_roots)
+            )
+            try:
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=poll_interval)
+                    if done:
+                        break
+                    if cancel_marker.exists():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        with contextlib.suppress(FileNotFoundError):
+                            cancel_marker.unlink()
+                        return False
+            except BaseException:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise
+            result = task.result()
         _atomic_write_json(spool / "results" / f"{request_id}.json", asdict(result))
     finally:
         with contextlib.suppress(FileNotFoundError):
@@ -804,6 +900,7 @@ async def serve_helper(
     _write_state()
     last_heartbeat = time.monotonic()
     tasks: set[asyncio.Task[bool]] = set()
+    limiter = asyncio.Semaphore(HELPER_MAX_INFLIGHT)
     try:
         while True:
             now = time.monotonic()
@@ -816,7 +913,13 @@ async def serve_helper(
                     break
                 tasks.add(
                     asyncio.create_task(
-                        _process_one_request(request, spool, allowed_roots=roots)
+                        _process_one_request(
+                            request,
+                            spool,
+                            allowed_roots=roots,
+                            limiter=limiter,
+                            poll_interval=poll_interval,
+                        )
                     )
                 )
             if once and tasks:

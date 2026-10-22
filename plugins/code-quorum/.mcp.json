@@ -4,7 +4,7 @@
       "command": "/bin/sh",
       "args": [
         "./scripts/run_codex_mcp_from_helper.sh",
-        "0.0.83"
+        "0.0.84"
       ],
       "cwd": ".",
       "env_vars": [

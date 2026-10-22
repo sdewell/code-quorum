@@ -92,7 +92,11 @@ On a Codex host, Claude and Gemini run through a narrowly scoped LaunchAgent
 helper because their containment cannot start inside Codex's outer sandbox.
 The helper accepts only those two seat types, checks that the requested working
 directory is under an allowed root, and rejects incompatible protocol versions
-before queueing a request.
+before queueing a request. It also checks each request at the boundary: a Claude
+effort outside the known set is refused before any process starts, a requested
+timeout is capped at 900 seconds, and at most eight claimed requests run at
+once. A client that gives up leaves a marker in the spool's `cancel` directory,
+and the helper then stops that run and writes no result.
 
 ### OpenCode isolation
 

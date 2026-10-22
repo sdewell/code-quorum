@@ -207,7 +207,7 @@ wheels = [
 
 [[package]]
 name = "code-quorum"
-version = "0.0.83"
+version = "0.0.84"
 source = { editable = "." }
 dependencies = [
     { name = "google-antigravity" },

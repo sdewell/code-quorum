@@ -1,6 +1,6 @@
 {
   "name": "code-quorum",
-  "version": "0.0.83",
+  "version": "0.0.84",
   "description": "Multi-agent planning, review, and forward research for Claude and Codex hosts",
   "author": {
     "name": "sdewell"

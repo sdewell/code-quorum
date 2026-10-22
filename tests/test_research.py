@@ -694,7 +694,7 @@ _GITHUB_JSON = (
     ' "language": "Python"}]}'
 )
 _HF_JSON = (
-    '[{"id": "org/model", "downloads": 1, "likes": 1,'
+    '[{"id": "org/diffusion-model", "downloads": 1, "likes": 1,'
     ' "pipeline_tag": "text-generation", "library_name": "transformers"}]'
 )
 
@@ -1379,7 +1379,7 @@ async def test_search_huggingface_parses_models():
 
     async with _client(handler) as client:
         models = await search_huggingface(
-            client, "embedding", limit=5, timeout=5.0, token=None
+            client, "sentence bare", limit=5, timeout=5.0, token=None
         )
 
     assert len(models) == 2
@@ -1425,7 +1425,8 @@ async def test_search_huggingface_unions_distinctive_terms():
 
     def handler(request):
         s = request.url.params.get("search")
-        calls.append(s)
+        if request.url.path == "/api/models":
+            calls.append(s)
         models = by_term.get(s, [])
         data = [{"id": mid, "downloads": dl, "likes": 1} for mid, dl in models]
         return httpx.Response(200, json=data)
@@ -1451,7 +1452,8 @@ async def test_search_huggingface_falls_back_to_raw_phrase_when_it_draws_hits():
     calls = []
 
     def handler(request):
-        calls.append(request.url.params.get("search"))
+        if request.url.path == "/api/models":
+            calls.append(request.url.params.get("search"))
         return httpx.Response(
             200, json=[{"id": "some/flow-matching-model", "downloads": 100, "likes": 1}]
         )
@@ -1476,7 +1478,8 @@ async def test_search_huggingface_escalates_to_word_union_when_phrase_draws_zero
 
     def handler(request):
         s = request.url.params.get("search")
-        calls.append(s)
+        if request.url.path == "/api/models":
+            calls.append(s)
         if s == topic:
             return httpx.Response(200, json=[])
         return httpx.Response(
@@ -1502,7 +1505,8 @@ async def test_search_huggingface_does_not_escalate_when_distinctive_terms_prese
     calls = []
 
     def handler(request):
-        calls.append(request.url.params.get("search"))
+        if request.url.path == "/api/models":
+            calls.append(request.url.params.get("search"))
         return httpx.Response(200, json=[])
 
     async with _client(handler) as client:
@@ -1522,7 +1526,8 @@ async def test_search_huggingface_raw_phrase_failure_raises_without_escalating()
     calls = []
 
     def handler(request):
-        calls.append(request.url.params.get("search"))
+        if request.url.path == "/api/models":
+            calls.append(request.url.params.get("search"))
         return httpx.Response(500, text="boom")
 
     async with _client(handler) as client:
@@ -1543,7 +1548,8 @@ async def test_search_huggingface_skips_escalation_when_identical_to_raw_phrase(
     calls = []
 
     def handler(request):
-        calls.append(request.url.params.get("search"))
+        if request.url.path == "/api/models":
+            calls.append(request.url.params.get("search"))
         return httpx.Response(200, json=[])
 
     async with _client(handler) as client:
@@ -1604,6 +1610,8 @@ async def test_search_huggingface_raw_zero_then_rate_limit_does_not_amplify_requ
 
     def handler(request):
         s = request.url.params.get("search")
+        if request.url.path == "/api/search/full-text":
+            return httpx.Response(200, json={"hits": []})
         calls.append(s)
         if s == topic:
             return httpx.Response(200, json=[])
@@ -4856,3 +4864,269 @@ def test_gh_auth_token_reads_a_signed_in_gh(tmp_path, monkeypatch):
 
     monkeypatch.setattr(research_mod.shutil, "which", lambda name: None)
     assert research_mod._read_gh_auth_token() is None
+
+
+def _partial_huggingface_handler(request):
+    # PuLID answers, IP-Adapter is rate-limited, InstantID is never reached
+    # (the fan-out stops on a 429).
+    term = request.url.params.get("search")
+    if term == "IP-Adapter":
+        return httpx.Response(429)
+    return httpx.Response(
+        200, json=[{"id": "guozinan/PuLID", "downloads": 5000, "likes": 1}]
+    )
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_partial_union_carries_coverage_note():
+    async with _client(_partial_huggingface_handler) as client:
+        models = await search_huggingface(
+            client,
+            "PuLID IP-Adapter InstantID identity",
+            limit=5,
+            timeout=5.0,
+            token=None,
+        )
+
+    assert [m.id for m in models] == ["guozinan/PuLID"]
+    note = getattr(models, "note", "")
+    assert "1 of 3 sub-queries failed (rate-limited), 1 not issued" in note
+    assert "rate-limited" in note
+    assert "partial" in note
+
+
+@pytest.mark.asyncio
+async def test_research_topic_digest_surfaces_partial_huggingface_coverage():
+    async with _client(_partial_huggingface_handler) as client:
+        digest = await research_topic(
+            "PuLID IP-Adapter InstantID identity",
+            sources={"huggingface"},
+            limit=5,
+            client=client,
+        )
+
+    assert [m.id for m in digest.models] == ["guozinan/PuLID"]
+    assert any(
+        "huggingface" in n and "rate-limited" in n and "partial" in n
+        for n in digest.notes
+    )
+
+
+def _hf_router(*, fulltext=None, listing=None, detail=None):
+    """Mock handler routing the three HuggingFace endpoints by path."""
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/search/full-text":
+            return fulltext(request) if fulltext else httpx.Response(404)
+        if path == "/api/models":
+            return httpx.Response(200, json=listing or [])
+        if path.startswith("/api/models/"):
+            return detail(request) if detail else httpx.Response(404)
+        return httpx.Response(404)
+
+    return handler
+
+
+_HF_FT_HIT_LIST: list[dict] = [
+    {
+        "name": "facebook/esm2_t6_8M_UR50D",
+        "isPrivate": False,
+        "likes": 40,
+        "tags": "transformers, pytorch, esm, fill-mask, license:mit",
+        "formatted": {
+            "fileContent": [
+                {"text": "ESM-2 is a protein ", "type": "text"},
+                {"text": "language", "type": "highlight"},
+                {"text": " model\n\nfor   structure.", "type": "text"},
+            ]
+        },
+    },
+    {
+        "name": "me/secret-protein-model",
+        "isPrivate": True,
+        "likes": 1,
+        "tags": "esm",
+        "formatted": {"fileContent": []},
+    },
+]
+
+
+_HF_FT_HITS = {"estimatedTotalHits": 2, "hits": _HF_FT_HIT_LIST}
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_fulltext_hit_parsed_and_outranks_zero_match_id():
+    handler = _hf_router(
+        fulltext=lambda r: httpx.Response(200, json=_HF_FT_HITS),
+        listing=[{"id": "acme/unrelated-thing", "downloads": 9_000_000, "likes": 5}],
+    )
+    async with _client(handler) as client:
+        models = await search_huggingface(
+            client, "protein language model", limit=5, timeout=5.0, token=None
+        )
+
+    assert [m.id for m in models] == ["facebook/esm2_t6_8M_UR50D"]
+    assert "esm" in models[0].tags
+    assert "license:mit" in models[0].tags
+    assert models[0].description == "ESM-2 is a protein language model for structure."
+
+
+def test_huggingface_lane_with_card_text_is_graded_like_a_repo():
+    models = [
+        HFModel(
+            id=f"org/protein-lm-{index}",
+            downloads=100,
+            likes=1,
+            pipeline_tag=None,
+            library_name=None,
+            url=f"https://huggingface.co/org/protein-lm-{index}",
+            tags=("esm", "fill-mask"),
+            description="A protein language model trained on UniRef.",
+        )
+        for index in range(3)
+    ]
+
+    status = _source_lane_status(
+        "huggingface", "lane-1", "protein language model", models, None
+    )
+
+    assert status.code == "ON-TOPIC"
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_enriches_fulltext_only_hits_and_survives_429():
+    def detail(request):
+        if request.url.path.endswith("esm2_t6_8M_UR50D"):
+            return httpx.Response(
+                200,
+                json={
+                    "downloads": 123456,
+                    "likes": 77,
+                    "pipeline_tag": "fill-mask",
+                    "library_name": "transformers",
+                },
+            )
+        return httpx.Response(429, text="rate limited")
+
+    hits = {
+        "hits": [
+            *_HF_FT_HIT_LIST[:1],
+            {
+                "name": "org/protein-language-model-xl",
+                "isPrivate": False,
+                "likes": 3,
+                "tags": "",
+                "formatted": {"fileContent": []},
+            },
+        ]
+    }
+    handler = _hf_router(
+        fulltext=lambda r: httpx.Response(200, json=hits), detail=detail
+    )
+    async with _client(handler) as client:
+        models = await search_huggingface(
+            client, "protein language model", limit=5, timeout=5.0, token=None
+        )
+
+    by_id = {m.id: m for m in models}
+    esm = by_id["facebook/esm2_t6_8M_UR50D"]
+    assert (esm.downloads, esm.pipeline_tag, esm.library_name) == (
+        123456,
+        "fill-mask",
+        "transformers",
+    )
+    assert by_id["org/protein-language-model-xl"].downloads == 0
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_fulltext_failure_keeps_substring_results():
+    handler = _hf_router(
+        fulltext=lambda r: httpx.Response(404),
+        listing=[{"id": "org/protein-language-model", "downloads": 10, "likes": 1}],
+    )
+    async with _client(handler) as client:
+        models = await search_huggingface(
+            client, "protein language model", limit=5, timeout=5.0, token=None
+        )
+
+    assert [m.id for m in models] == ["org/protein-language-model"]
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_fulltext_error_does_not_suppress_escalation():
+    topic = "Korean morphological analyzers for tokenization in NLP pipelines"
+
+    def handler(request):
+        if request.url.path == "/api/search/full-text":
+            return httpx.Response(500, text="boom")
+        s = request.url.params.get("search")
+        if s == topic:
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200, json=[{"id": f"someone/{s}-model", "downloads": 10, "likes": 1}]
+        )
+
+    async with _client(handler) as client:
+        models = await search_huggingface(
+            client, topic, limit=5, timeout=5.0, token=None
+        )
+
+    assert models
+    assert all(m.broadened for m in models)
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_fulltext_hits_do_not_block_word_escalation():
+    topic = "Korean morphological analyzers for tokenization in NLP pipelines"
+
+    def handler(request):
+        if request.url.path == "/api/search/full-text":
+            hit = {
+                "name": "acme/off-topic",
+                "isPrivate": False,
+                "likes": 0,
+                "tags": "",
+                "formatted": {"fileContent": []},
+            }
+            return httpx.Response(200, json={"hits": [hit]})
+        s = request.url.params.get("search")
+        if s == topic:
+            return httpx.Response(200, json=[])
+        return httpx.Response(
+            200, json=[{"id": f"someone/{s}-model", "downloads": 10, "likes": 1}]
+        )
+
+    async with _client(handler) as client:
+        models = await search_huggingface(
+            client, topic, limit=5, timeout=5.0, token=None
+        )
+
+    assert models
+    assert "acme/off-topic" not in [m.id for m in models]
+
+
+@pytest.mark.asyncio
+async def test_search_huggingface_fulltext_hit_survives_a_full_substring_pool():
+    listing = [
+        {"id": f"org/protein-{n}", "downloads": 100, "likes": 1} for n in range(15)
+    ]
+    hit = {
+        "name": "org/relevant",
+        "isPrivate": False,
+        "likes": 2,
+        "tags": "",
+        "formatted": {
+            "fileContent": [{"text": "A protein language model.", "type": "text"}]
+        },
+    }
+    handler = _hf_router(
+        fulltext=lambda r: httpx.Response(200, json={"hits": [hit]}),
+        listing=listing,
+    )
+    async with _client(handler) as client:
+        models = await search_huggingface(
+            client, "protein language model", limit=5, timeout=5.0, token=None
+        )
+
+    assert models[0].id == "org/relevant"
