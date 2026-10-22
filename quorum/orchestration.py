@@ -258,7 +258,7 @@ def make_gemini_agent(model_override: str | None = None) -> Agent:
     `model_override` (a council call's explicit request, e.g. a Claude slug for
     one run) beats CODE_QUORUM_GEMINI_MODEL (ambient session state), beats a
     recorded `quorum setup-models` choice, beats the seat default
-    (`Gemini 3.1 Pro (High)` -- a display name, not the slug, see
+    (`Gemini 4 Argon (High)` -- a display name, not the slug, see
     gemini_cli.DEFAULT_MODEL for the routing bug that forces it). All four take
     an id agy recognizes; agy resolves its two accepted forms differently and
     mis-routes one of them, so the seat rewrites that known-bad form to the one

@@ -80,6 +80,13 @@ runtime state, the login keychain file, and its Playwright cache. The process ca
 still read otherwise-readable paths outside `$HOME`. The sandbox covers only the
 council seat, not interactive `agy` use.
 
+The seat starts agy with `--agent code-quorum-seat`, a custom agent the seat
+writes into each private HOME with a tool list of exactly `view_file`,
+`list_dir`, `grep_search` and `find_by_name` and no subagents. That list is
+what lets the seat search a repository (agy 1.2.7 removed the search tools from
+its default agent); it is not the boundary. The sandbox still decides what any
+tool can reach.
+
 Each agy attempt writes a diagnostic log containing routing/error evidence and
 potentially reviewed prompt material. Code Quorum pre-creates the log directory
 as `0700`, files as `0600`, and deletes ordinary successful-attempt logs. A log

@@ -52,13 +52,16 @@ logger = logging.getLogger(__name__)
 # same model. agy accepts either form; it just resolves them differently.
 #
 # The effort tier is part of the name ("(High)" / -high), so model and reasoning
-# budget are chosen together. The council uses 3.1 Pro High -- the strongest the
-# AI Pro plan unlocks. Pro spends quota faster than Flash across a multi-round,
-# multi-seat council, so dial back per run with
-# CODE_QUORUM_GEMINI_MODEL="gemini-3.8-flash-high" (that slug is verified to
-# route correctly) or per-instance via GeminiCliAgent(model=...).
-DEFAULT_MODEL = "Gemini 3.1 Pro (High)"
-DEFAULT_MODEL_CATALOG_SLUG = "gemini-3.1-pro-high"
+# budget are chosen together. The council uses Gemini 4 Argon High -- the
+# strongest Gemini the AI Pro plan unlocks on agy 1.4.5. That release dropped
+# the previous default, Gemini 3.1 Pro (High), from `agy models` (observed
+# 2026-10-22: every seat run exited 1 with "invalid model selection"). Pro-tier
+# spends quota faster than Flash across a multi-round, multi-seat council, so
+# dial back per run with CODE_QUORUM_GEMINI_MODEL="gemini-3.8-flash-high" (that
+# slug is verified to route correctly) or per-instance via
+# GeminiCliAgent(model=...).
+DEFAULT_MODEL = "Gemini 4 Argon (High)"
+DEFAULT_MODEL_CATALOG_SLUG = "gemini-4-argon-high"
 
 # Pinning only the seat default would leave every OTHER way in on the bug, and
 # those are the likely ways in: `agy models` prints slugs, so a caller reaching
@@ -72,6 +75,11 @@ DEFAULT_MODEL_CATALOG_SLUG = "gemini-3.1-pro-high"
 # the remedy is one more entry here plus a canary case -- never a blanket rewrite.
 # Passing an unrecognized id through is also deliberate: agy rejecting a typo by
 # name beats this map quietly turning it into some other model.
+# The slug that mis-routed on 2026-07-29, gemini-3.1-pro-high, left agy's
+# catalog on 1.4.5 and is NOT aliased: agy now rejects it by name, which is the
+# loud failure a stale shell profile should get. The current Pro-tier slug
+# routes correctly (probed 2026-10-22 on 1.4.5) and is aliased only so both
+# forms of the default stay one model.
 MODEL_ROUTING_ALIASES = {
     DEFAULT_MODEL_CATALOG_SLUG: DEFAULT_MODEL,
     "gemini-3.8-flash-high": "Gemini 3.8 Flash (High)",
@@ -105,6 +113,51 @@ _AGY_TOKEN_NAME = "antigravity-oauth-token"
 # the shared tree -- conversations, brain, history.jsonl, summaries -- is other
 # runs' data and never enters a private home.
 _AGY_SEED_FILES = (_AGY_TOKEN_NAME, "settings.json", "installation_id")
+
+# The seat runs as its own agy custom agent, never as agy's default agent.
+#
+# agy 1.2.7 "retir[ed] the legacy find_by_name, grep_search, and list_dir tools
+# from the default baseline while keeping them available to custom agents that
+# explicitly list them in `tools`" (agy changelog). From that release on, the
+# default agent in --print mode can only view_file by an exact path: it cannot
+# list a directory or search, and its run_command is denied here. Asked to
+# "read the codebase to verify claims", the model spends the whole turn
+# guessing paths and dies at --print-timeout with no answer -- three gbac
+# reviews on 2026-10-21/22 made 35, 103 and 63 model calls each and every log
+# ended "Print mode: print timeout after 8m0s with turn in progress". Both
+# probed live on 1.2.14 and 1.4.5 (stream-json: the model's roster had no
+# list, grep or find tool; with this agent it had exactly the four below plus
+# manage_task, and all three worked under the seatbelt).
+#
+# Listing `tools` is also a narrowing: the agent gets no shell, write, browser,
+# subagent, scheduling or messaging tool at all. The seatbelt stays the
+# boundary; this just stops the model wasting turns on tools it cannot use.
+# The definition is written into every private HOME at agy's global agent
+# path (~/.gemini/config/agents/<name>/agent.md), so no run depends on the
+# user's real config carrying it. An unknown --agent makes headless agy exit 1
+# and list its agents (agy 1.3.x changelog), so a staging failure fails loud.
+AGY_SEAT_AGENT_NAME = "code-quorum-seat"
+AGY_SEAT_AGENT_TOOLS = ("view_file", "list_dir", "grep_search", "find_by_name")
+
+
+def seat_agent_definition() -> str:
+    """The Markdown agent definition staged into each private agy HOME."""
+    tools = "".join(f"  - {tool}\n" for tool in AGY_SEAT_AGENT_TOOLS)
+    return (
+        "---\n"
+        f"name: {AGY_SEAT_AGENT_NAME}\n"
+        "description: Read-only council seat for Code Quorum. Reads and "
+        "searches the workspace under review; never writes, never runs "
+        "commands.\n"
+        "tools:\n"
+        f"{tools}"
+        "mainAgent: true\n"
+        "subagent: false\n"
+        "---\n"
+        "You are a read-only reviewer. Use view_file, list_dir, grep_search and "
+        "find_by_name to inspect the workspace. You have no write, edit, shell, "
+        "browser or subagent tools; do not attempt them.\n"
+    )
 
 
 def _agy_token_path() -> Path:
@@ -237,7 +290,10 @@ REQUIRED_DENY = (
 # fence and its $TMPDIR-sibling / $HOME-listing canary.
 # 1.2.14 verified 2026-10-01: all 13 live checks passed with the private
 # HOME's login-keychain link.
-SEAT_VERIFIED_AGY_VERSION = "1.2.14"
+# 1.4.5 verified 2026-10-22: all 14 live checks passed, the seat running as
+# its custom agent (the new canary has it find a file it was not told about)
+# on the repinned Gemini 4 Argon / Claude Opus 5.5 models.
+SEAT_VERIFIED_AGY_VERSION = "1.4.5"
 
 
 def _sbpl(path: str | Path) -> str:
@@ -308,6 +364,21 @@ def _stage_private_agy_home() -> _PrivateAgyHome:
             shutil.copytree(
                 source / "config", root / ".gemini" / "config", symlinks=True
             )
+        # Our agent definition replaces anything of the same name the copied
+        # config carried (a stale or hand-edited one, or a symlink that would
+        # otherwise send this write outside the private home). The copy keeps
+        # symlinks as symlinks, so a linked agents/ folder is replaced too:
+        # this write runs in the host process, before any seatbelt, and must
+        # not land in the user's real config.
+        agents_dir = root / ".gemini" / "config" / "agents"
+        agent_dir = agents_dir / AGY_SEAT_AGENT_NAME
+        for entry in (agents_dir, agent_dir):
+            if entry.is_symlink() or entry.is_file():
+                entry.unlink()
+        if agent_dir.is_dir():
+            shutil.rmtree(agent_dir)
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.md").write_text(seat_agent_definition(), encoding="utf-8")
         # Without a keychain under HOME, agy's token save makes macOS show a
         # "Keychain Not Found" dialog that offers "Reset To Defaults" (S,
         # 2026-10-01). The link adds no access: the profile already allows
@@ -854,10 +925,11 @@ def check_seat_verified_version(installed: str | None = None) -> str | None:
 
 
 # Grace added to agy's own --print-timeout for the inner wait_for backstop. The
-# layering is: agy self-terminates at --print-timeout (480s); if it wedges and
-# ignores that, our inner wait_for fires at 480+30=510s; the council's hard
-# AGENT_TIMEOUT_S (900s) is the final cap. Kept under 900 so the inner backstop
-# wins for the default timeout.
+# layering is: agy self-terminates at --print-timeout (600s, the same default
+# the Codex-host seat helper applies, so a review gets one budget whichever
+# host runs it); if it wedges and ignores that, our inner wait_for fires at
+# 600+30=630s; the council's hard AGENT_TIMEOUT_S (900s) is the final cap. Kept
+# under 900 so the inner backstop wins for the default timeout.
 GEMINI_CLI_TIMEOUT_GRACE_S = 30.0
 AGY_AUTH_CHECK_TIMEOUT_S = 20.0
 
@@ -910,7 +982,7 @@ AGY_AUTH_CHECK_TIMEOUT_S = 20.0
 #                  its own 10s subprocess timeout) is excluded, so a slow
 #                  probe cannot eat the window.
 # Worst case added by the retry: one crash-window + delay + one full attempt
-# (~10+5+510s), still under the council's 900s AGENT_TIMEOUT_S cap.
+# (~10+5+630s), still under the council's 900s AGENT_TIMEOUT_S cap.
 AGY_TRANSIENT_CRASH_MARKER = "Agent execution terminated due to error"
 AGY_STARTUP_CRASH_WINDOW_S = 10.0
 AGY_STARTUP_RETRY_DELAY_S = 5.0
@@ -925,8 +997,8 @@ _AGY_AUTH_REFRESH_TRANSPORT_MARKER = "token refresh failed due to network error"
 
 # --- Quota reflex: Gemini -> Claude fallback ---------------------------------
 #
-# gemini-3.1-pro drains the AI Pro plan's Gemini quota fastest of anything the
-# council runs. When Google throttles or the bucket is empty, the seat dies
+# The Pro-tier Gemini default drains the AI Pro plan's Gemini quota fastest of
+# anything the council runs. When Google throttles or the bucket is empty, the seat dies
 # with a generic terminal error on stderr in older releases; agy 1.1.19 instead
 # surfaces "Individual quota reached" directly. In both shapes, the authoritative
 # RESOURCE_EXHAUSTED (code 429) evidence is in agy's own cli log. As a result,
@@ -934,22 +1006,23 @@ _AGY_AUTH_REFRESH_TRANSPORT_MARKER = "token refresh failed due to network error"
 # seatbelt's ~/.gemini write-allow; TMPDIR
 # is write-DENIED by design, so the log cannot live there), and a failed
 # attempt is classified by reading that log back. On quota evidence the seat
-# re-runs ONCE on AGY_QUOTA_FALLBACK_MODEL -- Claude Opus 4.6 Thinking, a
-# separate quota bucket the same AI Pro plan surfaces through agy (>=1.1.7
-# listing) -- and labels the answer with the swap so the council transcript
+# re-runs ONCE on AGY_QUOTA_FALLBACK_MODEL -- Claude Opus 5.5 (High), a
+# separate quota bucket the same AI Pro plan surfaces through agy (1.4.5
+# listing; Claude Opus 4.6 Thinking until agy dropped it) -- and labels the
+# answer with the swap so the council transcript
 # never changes engines silently. Pinned to `agy models` output exactly like
 # DEFAULT_MODEL, guarded by the same zero-quota listing test.
 #
 # The elapsed gate is a BUDGET, deliberately anchored at run() entry -- unlike
 # the startup-crash window, which measures the attempt alone. The
 # council kills the seat at AGENT_TIMEOUT_S (900s), and a fallback attempt
-# needs print-timeout + grace (510s). Reflexing only under 60s of total
-# elapsed keeps the worst case ~570s. The 60s therefore INCLUDES preflight
+# needs print-timeout + grace (630s). Reflexing only under 60s of total
+# elapsed keeps the worst case ~690s. The 60s therefore INCLUDES preflight
 # (notably the `agy --version` probe, up to 10s) -- that is the point: the
 # budget bounds wall clock against the council cap, which is also anchored at
 # run() entry. Observed quota deaths are fast (~3s); the gate excludes only
 # long mid-turn deaths, where a second full run would blow the cap anyway.
-AGY_QUOTA_FALLBACK_MODEL = "claude-opus-4-6-thinking"
+AGY_QUOTA_FALLBACK_MODEL = "claude-opus-5-5-high"
 AGY_QUOTA_LOG_MARKERS = ("RESOURCE_EXHAUSTED", "(code 429)")
 AGY_EXPLICIT_QUOTA_ERROR_MARKER = "Individual quota reached"
 AGY_QUOTA_REFLEX_MAX_ELAPSED_S = 60.0
@@ -989,9 +1062,9 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # on every version-verification run, so the line stops at the shipped/documented
 # surface rather than covering the whole catalog.
 AGY_EXPECTED_BACKEND_LABEL = {
-    DEFAULT_MODEL: "Gemini 3.1 Pro (High)",
+    DEFAULT_MODEL: "Gemini 4 Argon (High)",
     "Gemini 3.8 Flash (High)": "Gemini 3.8 Flash (High)",
-    AGY_QUOTA_FALLBACK_MODEL: "Claude Opus 4.6 (Thinking)",
+    AGY_QUOTA_FALLBACK_MODEL: "Claude Opus 5.5 (High)",
 }
 
 _AGY_BACKEND_LABEL_RE = re.compile(
@@ -1060,6 +1133,27 @@ def _log_shows_quota_exhaustion(run_log: Path) -> bool:
     except OSError:
         return False
     return any(marker in text for marker in AGY_QUOTA_LOG_MARKERS)
+
+
+# agy ends a --print run at its --print-timeout with exit 0 and NO stdout, so
+# the seat saw only "no answer (clean exit, empty output)" and the council
+# header said "returned nothing" -- the shape three gbac reviews wore on
+# 2026-10-21/22 while agy's own log said what happened. The log line is the
+# evidence, so the seat reads it back and reports a timeout, quoting it.
+_AGY_PRINT_TIMEOUT_MARKER = "Print mode: print timeout after"
+
+
+def _log_print_timeout_line(run_log: Path) -> str | None:
+    """agy's own print-timeout line from an attempt's log, or None. A missing
+    or unreadable log is no evidence: the failure then reports as itself."""
+    try:
+        text = run_log.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if _AGY_PRINT_TIMEOUT_MARKER in line:
+            return line.strip()
+    return None
 
 
 def _log_shows_auth_refresh_transport_failure(run_log: Path) -> bool:
@@ -1283,8 +1377,9 @@ def _is_transient_startup_crash(result: AgentResult, attempt_s: float) -> bool:
 # `--research` digest, and conceptual prior-art queries over pasting repo code.
 COUNCIL_CLI_PREAMBLE = (
     "You are a council member running non-interactively via the Antigravity CLI. "
-    "Use your read tools (read_file, list_directory, glob) to open any repository "
-    "file the prompt refers to before answering. You are read-only: you have no "
+    "Use your read tools (view_file, list_dir, grep_search, find_by_name) to open "
+    "any repository file the prompt refers to before answering. You are read-only: "
+    "you have no "
     "write, edit, or shell tools -- do not attempt them, and do not treat their "
     "absence as an error. Prefer the context already supplied and any research "
     "digest in the prompt over live web search; if you do search the web, query "
@@ -1390,7 +1485,7 @@ class GeminiCliAgent(Agent):
         self,
         binary: str = "agy",
         model: str = DEFAULT_MODEL,
-        print_timeout: float = 480.0,
+        print_timeout: float = 600.0,
         model_source: str = "shipped",
         recorded_cli_version: str | None = None,
     ):
@@ -1448,6 +1543,8 @@ class GeminiCliAgent(Agent):
         cmd += [
             "--model",
             canonical_model(model) if model else self.model,
+            "--agent",
+            AGY_SEAT_AGENT_NAME,
             "--print-timeout",
             f"{int(self.print_timeout)}s",
         ]
@@ -1997,6 +2094,28 @@ class GeminiCliAgent(Agent):
                 ):
                     result.error = append_recorded_source_hint(
                         result.error, asked_model, self.model_source
+                    )
+            if result.returncode == GEMINI_CLI_NO_OUTPUT_RC and active_log is not None:
+                timeout_line = await asyncio.to_thread(
+                    _log_print_timeout_line, active_log
+                )
+                if timeout_line is not None:
+                    # Not "returned nothing": agy cut the turn off at its own
+                    # --print-timeout and printed no answer. Same rc as the
+                    # inner backstop, so the header reads timeout either way.
+                    result = AgentResult(
+                        agent=self.name,
+                        output="",
+                        error=(
+                            "agy stopped at its --print-timeout "
+                            f"({int(self.print_timeout)}s) with the model turn "
+                            "still in progress and printed no answer. agy's log: "
+                            f"{timeout_line}"
+                        ),
+                        returncode=GEMINI_CLI_TIMEOUT_RC,
+                        duration_s=result.duration_s,
+                        model=result.model,
+                        unavailable_reason="timeout",
                     )
             if result.returncode != 0:
                 quota_exhausted = bool(

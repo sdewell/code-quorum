@@ -154,7 +154,28 @@ def test_skill_documents_gemini_model(skill: str) -> None:
     text = _skill(skill).lower()
     assert "--gemini-model" in text
     assert "`gemini_model`" in text
-    assert "claude-opus-4-6-thinking" in text
+    assert "claude-opus-5-5-high" in text
+
+
+def test_mcp_tool_descriptions_name_the_live_fallback_model() -> None:
+    """The MCP tool descriptions are the help text a host LLM reads to fill
+    `gemini_model`, so the example id they carry must be one agy still
+    offers. The 2026-10-22 repin to claude-opus-5-5-high updated the skills
+    and the CLI help but not these four docstrings, and a client following
+    them would have sent agy 1.4.5 an id it rejects with exit 1."""
+    from quorum.agents.gemini_cli import AGY_QUOTA_FALLBACK_MODEL
+    from quorum_mcp.server import (
+        q_brainstorm_start,
+        q_plan_start,
+        q_review_start,
+        q_validate_start,
+    )
+
+    for tool in (q_plan_start, q_brainstorm_start, q_validate_start, q_review_start):
+        doc = tool.__doc__ or ""
+        assert "gemini_model" in doc
+        assert AGY_QUOTA_FALLBACK_MODEL in doc, tool.__name__
+        assert "claude-opus-4-6-thinking" not in doc, tool.__name__
 
 
 @pytest.mark.parametrize(

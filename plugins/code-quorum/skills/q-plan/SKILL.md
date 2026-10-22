@@ -41,7 +41,7 @@ Call `mcp__plugin_code-quorum_quorum__q_plan_start` (Claude Code) or
 - `cwd`: the absolute path of the project working directory
 - `host`: the current host selected above
 - `verbose`: `false` by default — plans come back **terse** (no padding, `path:line` over pasted code). Set `true` only if the user gave `--verbose`.
-- `gemini_model`: omit by default. Pass an agy model id (exactly as printed by `agy models`) when the user gave `--gemini-model <id>` or asked for a specific model in the gemini seat — e.g. `claude-opus-4-6-thinking` to have that seat answer with Claude on the same AI Pro plan (useful when Gemini quota is tight or a Claude perspective is wanted).
+- `gemini_model`: omit by default. Pass an agy model id (exactly as printed by `agy models`) when the user gave `--gemini-model <id>` or asked for a specific model in the gemini seat — e.g. `claude-opus-5-5-high` to have that seat answer with Claude on the same AI Pro plan (useful when Gemini quota is tight or a Claude perspective is wanted).
 
 You will receive a `job_id` immediately. The agents now run in parallel in the background; you cannot see their output yet. This is intentional — the structural anti-bias gate.
 

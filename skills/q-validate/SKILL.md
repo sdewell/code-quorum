@@ -49,7 +49,7 @@ Call `mcp__plugin_code-quorum_quorum__q_validate_start` (Claude Code) or
 - `mode`: `"revise"` (default) — agents soften or strengthen positions in light of peers. Use `"critique"` when you want them to attack each other's points.
 - `agents`: optional; omit it for every external seat in the current host profile (a seat the user has marked disabled in `quorum setup-models` is skipped from that default roster). Passing `agents` explicitly overrides the skip and runs a disabled seat anyway — a deliberate ask always runs.
 - `verbose`: `false` by default. The council writes **terse** output — no prose padding, `path:line` citations instead of pasted code, and later rounds omit restating what is unchanged. Set `true` only if the user gave `--verbose`; it produces a much larger matrix.
-- `gemini_model`: omit by default. Pass an agy model id (exactly as printed by `agy models`) when the user gave `--gemini-model <id>` or asked for a specific model in the gemini seat — e.g. `claude-opus-4-6-thinking` to have that seat answer with Claude on the same AI Pro plan.
+- `gemini_model`: omit by default. Pass an agy model id (exactly as printed by `agy models`) when the user gave `--gemini-model <id>` or asked for a specific model in the gemini seat — e.g. `claude-opus-5-5-high` to have that seat answer with Claude on the same AI Pro plan.
 
 You will receive a `job_id` immediately. The agents now review the plan in parallel in the background; you cannot see their output yet. This is intentional — the structural anti-bias gate.
 

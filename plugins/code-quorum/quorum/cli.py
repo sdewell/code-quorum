@@ -188,7 +188,7 @@ GeminiModelOption = Annotated[
     typer.Option(
         "--gemini-model",
         help="Run the gemini seat on this agy model for this invocation only "
-        "(an id exactly as `agy models` prints, e.g. claude-opus-4-6-thinking). "
+        "(an id exactly as `agy models` prints, e.g. claude-opus-5-5-high). "
         "Beats CODE_QUORUM_GEMINI_MODEL.",
     ),
 ]

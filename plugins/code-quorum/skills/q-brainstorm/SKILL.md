@@ -133,7 +133,7 @@ Call `mcp__plugin_code-quorum_quorum__q_brainstorm_start` (Claude Code) or
   `--verbose`.
 - `gemini_model`: omit by default. Pass an agy model id (exactly as printed by
   `agy models`) when the user gave `--gemini-model <id>` or asked for a
-  specific model in the gemini seat — e.g. `claude-opus-4-6-thinking` to have
+  specific model in the gemini seat — e.g. `claude-opus-5-5-high` to have
   that seat answer with Claude on the same AI Pro plan.
 
 You will receive a `job_id` immediately. The agents now generate ideas in

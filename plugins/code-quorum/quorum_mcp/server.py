@@ -144,7 +144,7 @@ async def q_plan_start(
 
     `gemini_model`, when supplied, runs the gemini seat on that agy model for
     this invocation only -- an id exactly as printed by `agy models`, e.g.
-    'claude-opus-4-6-thinking' to get a Claude answer from the same AI Pro
+    'claude-opus-5-5-high' to get a Claude answer from the same AI Pro
     plan when Gemini quota is tight or a different perspective is wanted.
 
     Expected wall-clock to completion: 30s-4min depending on the agents
@@ -217,7 +217,7 @@ async def q_brainstorm_start(
 
     `gemini_model`, when supplied, runs the gemini seat on that agy model for
     this invocation only (an id exactly as printed by `agy models`, e.g.
-    'claude-opus-4-6-thinking').
+    'claude-opus-5-5-high').
 
     `skip_disabled`, with an explicit `agents` list, leaves out any listed
     seat the user marked disabled in `quorum setup-models` (reported as
@@ -291,7 +291,7 @@ async def q_validate_start(
 
     `gemini_model`, when supplied, runs the gemini seat on that agy model for
     this invocation only (an id exactly as printed by `agy models`, e.g.
-    'claude-opus-4-6-thinking').
+    'claude-opus-5-5-high').
 
     Expected wall-clock to completion: 1-8min default; 4-15min when
     extended=true. Pick extended deliberately."""
@@ -373,7 +373,7 @@ async def q_review_start(
 
     `gemini_model`, when supplied, runs the gemini seat on that agy model for
     this invocation only (an id exactly as printed by `agy models`, e.g.
-    'claude-opus-4-6-thinking').
+    'claude-opus-5-5-high').
 
     Expected wall-clock to completion: 1-8min default; 4-15min when
     extended=true. Pick extended deliberately."""

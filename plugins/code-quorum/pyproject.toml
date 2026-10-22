@@ -1,6 +1,6 @@
 [project]
 name = "code-quorum"
-version = "0.0.84"
+version = "0.0.85"
 description = "Multi-agent council for Claude Code and Codex"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -40,7 +40,10 @@ dev = [
 # default -- the two disagree and CI's `ruff format --check` fails. Pinning
 # it here makes the hook and CI use the same width.
 line-length = 88
-exclude = ["plugins/"]
+# ruff 0.16+ formats and lints the fenced Python inside Markdown by default
+# ("*.md" joined the default include). The dated plans and specs under docs/
+# are archived records kept verbatim (CLAUDE.md), so Markdown is excluded.
+exclude = ["plugins/", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

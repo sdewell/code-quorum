@@ -395,7 +395,10 @@ def test_build_command_shape() -> None:
     assert COUNCIL_CLI_PREAMBLE in printed
     assert cmd[cmd.index("--add-dir") + 1] == "/repo/proj"
     assert cmd[cmd.index("--model") + 1] == gc.DEFAULT_MODEL  # not a hardcoded str
-    assert cmd[cmd.index("--print-timeout") + 1] == "480s"
+    # 600s matches the Codex-host seat helper's default: one budget per review
+    # whichever host runs it (the gbac runs of 2026-10-21/22 all died at the
+    # old 480s while helper-path successes had run to 642s).
+    assert cmd[cmd.index("--print-timeout") + 1] == "600s"
 
 
 def test_build_command_model_and_timeout_override() -> None:
@@ -418,6 +421,26 @@ def test_build_command_nonhidden_cwd_unchanged() -> None:
         prompt="x", cwd="/Users/sd/Code/proj", sandbox_profile="/tmp/p.sb"
     )
     assert cmd[cmd.index("--add-dir") + 1] == "/Users/sd/Code/proj"
+
+
+def test_build_command_runs_the_seat_agent() -> None:
+    # agy 1.2.7 retired list_dir, grep_search and find_by_name from the DEFAULT
+    # agent. Left on it, the seat can only view_file by exact path, so a review
+    # spends its turn guessing paths and dies at --print-timeout with nothing
+    # (gbac, 2026-10-21/22). The seat therefore always runs as its own custom
+    # agent, which lists the read tools explicitly.
+    cmd = GeminiCliAgent().build_command(
+        prompt="x", cwd="/Users/sd/Code/proj", sandbox_profile="/tmp/p.sb"
+    )
+    assert cmd[cmd.index("--agent") + 1] == gc.AGY_SEAT_AGENT_NAME
+    # The fallback attempt goes through the same agent.
+    fallback = GeminiCliAgent().build_command(
+        prompt="x",
+        cwd="/Users/sd/Code/proj",
+        sandbox_profile="/tmp/p.sb",
+        model=gc.AGY_QUOTA_FALLBACK_MODEL,
+    )
+    assert fallback[fallback.index("--agent") + 1] == gc.AGY_SEAT_AGENT_NAME
 
 
 # --- read-only sandbox (the actual enforcement) ------------------------------
@@ -670,6 +693,76 @@ def test_private_agy_home_seeds_login_and_config_only(tmp_path: Path) -> None:
     finally:
         gc._retire_private_agy_home(private)
     assert not private.root.exists()
+
+
+def test_private_agy_home_stages_the_seat_agent(tmp_path: Path) -> None:
+    # The custom agent that restores the read tools is written into every
+    # private home at agy's global agent location, so no run depends on the
+    # user's real ~/.gemini/config carrying it -- and a definition of the same
+    # name already there (a stale one, or a symlink out of the private home)
+    # is replaced by ours, never written through.
+    gemini = tmp_path / "real-gemini"
+    _fake_agy_state(gemini)
+    stale = gemini / "config" / "agents" / gc.AGY_SEAT_AGENT_NAME
+    stale.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (stale / "agent.md").symlink_to(elsewhere / "agent.md")
+
+    private = gc._stage_private_agy_home()
+    try:
+        agent_md = (
+            private.root / ".gemini" / "config" / "agents" / gc.AGY_SEAT_AGENT_NAME
+        ) / "agent.md"
+        assert agent_md.is_file() and not agent_md.is_symlink()
+        text = agent_md.read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        assert f"name: {gc.AGY_SEAT_AGENT_NAME}\n" in text
+        assert "mainAgent: true" in text
+        # Narrowing is the point: the tools list is exactly the four read
+        # tools -- no shell, write, browser or subagent tool.
+        frontmatter = text.split("---", 2)[1]
+        listed = [
+            line.strip()[2:]
+            for line in frontmatter.splitlines()
+            if line.startswith("  - ")
+        ]
+        assert listed == list(gc.AGY_SEAT_AGENT_TOOLS)
+    finally:
+        gc._retire_private_agy_home(private)
+    assert not (elsewhere / "agent.md").exists()
+    assert not private.root.exists()
+
+
+def test_private_agy_home_replaces_a_symlinked_agents_dir(tmp_path: Path) -> None:
+    # The config copy keeps symlinks as symlinks, so a user whose
+    # ~/.gemini/config/agents is a link to a folder elsewhere would otherwise
+    # get our agent written into that folder from the host process (no
+    # seatbelt yet) and left there when the private home is retired. The link
+    # is replaced by a real folder inside the private home.
+    gemini = tmp_path / "real-gemini"
+    _fake_agy_state(gemini)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (gemini / "config" / "agents").symlink_to(elsewhere)
+
+    private = gc._stage_private_agy_home()
+    try:
+        agents = private.root / ".gemini" / "config" / "agents"
+        assert agents.is_dir() and not agents.is_symlink()
+        assert (agents / gc.AGY_SEAT_AGENT_NAME / "agent.md").is_file()
+    finally:
+        gc._retire_private_agy_home(private)
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_seat_agent_tools_are_exactly_the_four_read_tools() -> None:
+    assert set(gc.AGY_SEAT_AGENT_TOOLS) == {
+        "view_file",
+        "list_dir",
+        "grep_search",
+        "find_by_name",
+    }
 
 
 def test_private_agy_home_copies_back_only_an_uncontested_refresh(
@@ -934,6 +1027,16 @@ def test_preamble_steers_web_search_to_context_and_research() -> None:
     assert "web search" in low or "search the web" in low
     assert "research" in low  # the curated --research channel
     assert "approach" in low or "prior art" in low or "how others" in low
+
+
+def test_preamble_names_the_seat_agent_tools() -> None:
+    # The preamble names the tools the seat agent actually carries. The old
+    # names (read_file, list_directory, glob) were never agy's and cost the
+    # model a wasted turn finding that out.
+    for tool in gc.AGY_SEAT_AGENT_TOOLS:
+        assert tool in COUNCIL_CLI_PREAMBLE
+    for stale in ("read_file", "list_directory", "glob"):
+        assert stale not in COUNCIL_CLI_PREAMBLE
 
 
 # --- run() -------------------------------------------------------------------
@@ -1444,6 +1547,50 @@ def test_auth_check_rejects_nonempty_output_without_a_model_row(
     assert "no valid model listing" in result.error
 
 
+def test_run_print_timeout_in_log_maps_to_timeout_rc(monkeypatch, tmp_path) -> None:
+    # agy's --print-timeout ends the run with exit 0 and NO stdout, which the
+    # seat used to report as "returned nothing (exit 125)". Three gbac reviews
+    # on 2026-10-21/22 were read that way while agy's own log said
+    # "Print mode: print timeout after 8m0s with turn in progress". The log line
+    # is the evidence; the seat must report a timeout, and quote it.
+    _patch_run_seams_sequenced(monkeypatch, [(0, b"", b"")], tmp_path)
+    timeout_line = (
+        "W1022 09:40:32.036565       1 poll.go:187] Print mode: print timeout "
+        "after 8m0s with turn in progress after 18373 polls (printed=123)"
+    )
+    logs: list[Path] = []
+
+    def _next() -> Path:
+        p = tmp_path / f"run-{len(logs) + 1}.log"
+        p.write_text(
+            _routing_line(gc.DEFAULT_MODEL) + timeout_line + "\n", encoding="utf-8"
+        )
+        logs.append(p)
+        return p
+
+    monkeypatch.setattr(gc, "_new_run_log_path", _next)
+
+    result = asyncio.run(gc.GeminiCliAgent(print_timeout=480.0).run("x", cwd="/r"))
+
+    assert result.returncode == gc.GEMINI_CLI_TIMEOUT_RC
+    assert result.unavailable_reason == "timeout"
+    assert "480s" in result.error
+    assert "turn in progress" in result.error
+    assert result.output == ""
+
+
+def test_run_empty_output_without_timeout_evidence_stays_no_output(
+    monkeypatch, tmp_path
+) -> None:
+    _patch_run_seams_sequenced(monkeypatch, [(0, b"", b"")], tmp_path)
+    _patch_run_logs(monkeypatch, tmp_path, quota_attempts=set())
+
+    result = asyncio.run(gc.GeminiCliAgent().run("x", cwd="/r"))
+
+    assert result.returncode == gc.GEMINI_CLI_NO_OUTPUT_RC
+    assert result.unavailable_reason == "no output"
+
+
 # --- Transient startup-crash retry -------------------------------------------
 from quorum.agents.base import AgentResult  # noqa: E402
 
@@ -1685,6 +1832,8 @@ def test_resolved_backend_labels_reads_routing_from_the_log(tmp_path: Path) -> N
         ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
         ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
         ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+        ("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
     ],
 )
 def test_routing_key_collapses_agys_two_naming_conventions(
@@ -2340,7 +2489,7 @@ def test_run_does_not_cry_misroute_at_its_own_quota_fallback(
         else:  # attempt 2: agy honestly reports the Claude engine
             p.write_text(
                 "I0729 model_config_manager.go:272] Propagating selected model "
-                'override to backend: label="Claude Opus 4.6 (Thinking)"\n',
+                'override to backend: label="Claude Opus 5.5 (High)"\n',
                 encoding="utf-8",
             )
         attempts.append(p)
@@ -2611,7 +2760,7 @@ def test_factory_default_model_is_pro() -> None:  # conftest clears the env
     # A literal, deliberately: looking the model up in AGY_EXPECTED_BACKEND_LABEL
     # would compare that dict's Pro value against its own key and pass for any
     # string at all. This names the engine the council is supposed to be on.
-    assert agent.model == "Gemini 3.1 Pro (High)"
+    assert agent.model == "Gemini 4 Argon (High)"
 
 
 def test_factory_model_override(monkeypatch) -> None:
@@ -3085,6 +3234,33 @@ def test_live_reads_repo_file(tmp_path: Path) -> None:
 
 @pytest.mark.live
 @pytest.mark.skipif(not _live_gate(), reason=_LIVE_REASON)
+def test_live_seat_agent_can_find_a_file_it_was_not_told_about(
+    tmp_path: Path,
+) -> None:
+    # The default agy agent (1.2.7+) has no list, grep or find tool, so a file
+    # whose path the prompt does not give cannot be found at all. This proves
+    # the seat agent carries them and that they work under the seatbelt: the
+    # only way to answer is to list or search.
+    nested = tmp_path / "nested" / "deeper"
+    nested.mkdir(parents=True)
+    (nested / "needle.txt").write_text("NEEDLE_MARKER_7731\n", encoding="utf-8")
+    (tmp_path / "decoy.txt").write_text("nothing here\n", encoding="utf-8")
+    result = asyncio.run(
+        gc.GeminiCliAgent().run(
+            prompt=(
+                "Exactly one file somewhere under the working directory contains "
+                "the text NEEDLE_MARKER_7731. Find it and reply with ONLY its path "
+                "relative to the working directory."
+            ),
+            cwd=str(tmp_path),
+        )
+    )
+    assert result.returncode == 0, result.error
+    assert "nested/deeper/needle.txt" in result.output, result.output
+
+
+@pytest.mark.live
+@pytest.mark.skipif(not _live_gate(), reason=_LIVE_REASON)
 def test_live_read_outside_workspace_is_refused(tmp_path: Path) -> None:
     # The $HOME read fence was proven by profile TEXT only
     # (test_sandbox_profile_denies_writes_and_fences_home) until 2026-09-17: no
@@ -3379,19 +3555,30 @@ def test_live_seat_models_route_to_expected_backend(tmp_path: Path, model: str) 
         encoding="utf-8",
     )
     agent = gc.GeminiCliAgent(model=model, print_timeout=120.0)
-    cmd = agent.build_command(
-        prompt="Reply with exactly OK.",
-        cwd=str(tmp_path),
-        sandbox_profile=str(profile),
-        log_file=str(run_log),
-    )
-    # cwd matches production (_spawn_and_collect anchors agy at the review cwd).
-    # The sandbox profile and --add-dir already point at tmp_path; leaving the
-    # process in the pytest repo root would let agy discover config and resolve
-    # relative paths somewhere the seat never runs it.
-    proc = subprocess.run(
-        cmd, cwd=str(tmp_path), capture_output=True, text=True, timeout=240
-    )
+    # The argv names the custom agent the seat stages into its private HOME,
+    # so the canary runs in one too: under a bare HOME agy exits 1 with
+    # 'unknown agent "code-quorum-seat"' before it resolves any model, and the
+    # log then carries no routing line at all.
+    with gc.private_agy_home() as (agy_home, env):
+        profile.write_text(
+            gc.build_sandbox_profile(
+                cwd=str(tmp_path), binary_path=shutil.which("agy"), agy_home=agy_home
+            ),
+            encoding="utf-8",
+        )
+        cmd = agent.build_command(
+            prompt="Reply with exactly OK.",
+            cwd=str(tmp_path),
+            sandbox_profile=str(profile),
+            log_file=str(run_log),
+        )
+        # cwd matches production (_spawn_and_collect anchors agy at the review
+        # cwd). The sandbox profile and --add-dir already point at tmp_path;
+        # leaving the process in the pytest repo root would let agy discover
+        # config and resolve relative paths somewhere the seat never runs it.
+        proc = subprocess.run(
+            cmd, cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=240
+        )
 
     labels = gc.resolved_backend_labels(run_log)
     # Three ways to have no routing evidence, each with a different remedy --
