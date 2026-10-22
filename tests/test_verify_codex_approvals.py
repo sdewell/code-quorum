@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -224,5 +225,31 @@ def test_release_runbook_separates_local_refresh_and_github_verification() -> No
     assert "Run this required release test separately" in github
     assert 'codex plugin marketplace add "$marketplace_root"' in github
     assert "validate_plugin.py \\\n" not in releasing
-    assert "claude plugin validate /path/to/export-dry-run-clone --strict" in local
+    assert "claude plugin validate /path/to/export-dry-run-clone --json" in local
+    validation = re.search(r"jq -e \\\n\s*'([^']+)'", local)
+    assert validation is not None
+    known_warning = {
+        "path": "root",
+        "message": "CLAUDE.md at the plugin root is not loaded as project context",
+    }
+    for errors, warnings, accepted in (
+        ([], [known_warning], True),
+        ([], [], False),
+        ([], [known_warning, known_warning], False),
+        ([], [{**known_warning, "path": "other"}], False),
+        ([], [{**known_warning, "message": "unexpected warning"}], False),
+        ([{"message": "invalid plugin"}], [known_warning], False),
+    ):
+        result = subprocess.run(
+            ["jq", "-e", validation.group(1)],
+            input=json.dumps(
+                {
+                    "manifest": {"errors": errors, "warnings": []},
+                    "contents": [{"errors": [], "warnings": warnings}],
+                }
+            ),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == (0 if accepted else 1), result.stderr
     assert local.index("4. Commit") < local.index("scripts/export_public.py --dry-run")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Iterator
 
 import pytest
@@ -56,6 +57,60 @@ def test_resolve_cwd_rejects_relative_directory(cwd: str) -> None:
 
     with pytest.raises(ValueError, match="must be absolute"):
         server._resolve_cwd(cwd)
+
+
+@pytest.mark.parametrize(
+    "entry", ["plan", "brainstorm", "validate", "review", "helper"]
+)
+@pytest.mark.asyncio
+async def test_cwd_git_discovery_keeps_event_loop_responsive(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, entry: str
+) -> None:
+    from quorum.agents import seat_helper
+    from quorum_mcp import server
+
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    monkeypatch.setattr(server, "active_allowed_roots", lambda: (allowed,))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_git(*_args):
+        entered.set()
+        assert release.wait(2), "git discovery blocked the event loop heartbeat"
+        return None
+
+    monkeypatch.setattr(seat_helper, "_git_binary", lambda: "git")
+    monkeypatch.setattr(seat_helper, "_git_query", slow_git)
+
+    async def heartbeat():
+        while not entered.is_set():
+            await asyncio.sleep(0)
+        release.set()
+
+    beat = asyncio.create_task(heartbeat())
+    try:
+        if entry == "helper":
+            result = await seat_helper._run_request(
+                {"seat": "claude", "cwd": str(outside), "prompt": "review"},
+                allowed_roots=(allowed,),
+            )
+            assert "outside allowed roots" in result.error
+        else:
+            tool, arguments = {
+                "plan": (server.q_plan_start, {"task": "review"}),
+                "brainstorm": (server.q_brainstorm_start, {"topic": "review"}),
+                "validate": (server.q_validate_start, {"plan_path": "PLAN.md"}),
+                "review": (server.q_review_start, {}),
+            }[entry]
+            with pytest.raises(ValueError, match="outside allowed roots"):
+                await tool(cwd=str(outside), **arguments)
+    finally:
+        release.set()
+        beat.cancel()
+        await asyncio.gather(beat, return_exceptions=True)
 
 
 @pytest.mark.asyncio

@@ -681,7 +681,7 @@ async def _run_request(
             returncode=1,
             unavailable_reason="seat helper",
         )
-    allowed_error = cwd_allowed_error(cwd, allowed_roots)
+    allowed_error = await asyncio.to_thread(cwd_allowed_error, cwd, allowed_roots)
     if allowed_error is not None:
         return AgentResult(
             agent=seat,

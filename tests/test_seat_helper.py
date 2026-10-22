@@ -167,7 +167,11 @@ def test_default_allowed_roots_env_override_replaces_defaults(
 
 def _git(*args: str, cwd: Path) -> None:
     env = {
-        **os.environ,
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        },
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_AUTHOR_NAME": "t",
@@ -190,7 +194,7 @@ def _repo_with_linked_worktree(main: Path, worktree: Path) -> None:
 
 
 def test_cwd_allowed_error_permits_linked_worktree_of_repo_under_root(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Worktrees land wherever the user's tooling puts them (Worktrunk's
     # ~/.agent-worktrees, a sibling directory, ...). A worktree whose main
@@ -198,6 +202,7 @@ def test_cwd_allowed_error_permits_linked_worktree_of_repo_under_root(
     # without the roots naming the worktree location.
     root = tmp_path / "Code"
     worktree = tmp_path / "elsewhere" / "repo" / "task"
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "ambient.git"))
     _repo_with_linked_worktree(root / "repo", worktree)
 
     assert sh.cwd_allowed_error(str(worktree), (root.resolve(),)) is None

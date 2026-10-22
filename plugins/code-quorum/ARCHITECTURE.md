@@ -110,7 +110,10 @@ The MCP surface exposes `q_plan_start` / `q_brainstorm_start` /
 `q_await(job_id)`, and synchronous `q_research`. Every start requires an
 explicit absolute project `cwd`, accepts `host="claude"|"codex"`, and passes
 both through the shared orchestration path. Missing or blank `cwd` values fail
-before a job is created. `jobs.py` runs councils as background tasks with a TTL
+before a job is created. Directory validation can query git for linked
+worktrees, so MCP starts and helper requests run the check in worker threads
+to keep other jobs and the helper heartbeat responsive.
+`jobs.py` runs councils as background tasks with a TTL
 reaper. The CLI stays synchronous. A job lives only in server memory, so
 `hooks/hooks.json` adds a Stop hook (`scripts/unawaited_job_stop_hook.py`) that
 reads either host's transcript and blocks the end of a turn while a started

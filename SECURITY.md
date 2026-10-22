@@ -163,8 +163,9 @@ that is not a linked worktree of such a repository is refused as before, and
 so is a machine without git.
 Plan and scope documents must resolve inside that `cwd`; absolute
 paths, `..` escapes, and symlink escapes are rejected before their contents are
-read. Because a `cwd` under `~/.codex/agent-worktrees` is hidden, the Gemini
-SDK backend would otherwise widen its workspace to the home directory with no
+read. For a `cwd` under a hidden directory in `$HOME`, such as
+`~/.agent-worktrees` or `~/.codex/agent-worktrees`, the Gemini SDK backend
+would otherwise widen its workspace to the home directory with no
 sandbox to fence that read scope; it refuses to run for such a `cwd` instead.
 
 A bare `q-review` compares the branch with the default-branch merge-base and

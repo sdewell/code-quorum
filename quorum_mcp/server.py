@@ -12,6 +12,7 @@ The CLI surface remains synchronous — only the MCP path uses start/await.
 from __future__ import annotations
 
 import argparse
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -148,7 +149,7 @@ async def q_plan_start(
 
     Expected wall-clock to completion: 30s-4min depending on the agents
     and codebase size."""
-    target_cwd = _resolve_cwd(cwd)
+    target_cwd = await asyncio.to_thread(_resolve_cwd, cwd)
     chosen, skipped = select_agents(agents, roles, gemini_model=gemini_model, host=host)
     if not chosen:
         return await _no_live_seats_job(skipped)
@@ -226,7 +227,7 @@ async def q_brainstorm_start(
 
     Expected wall-clock to completion: 30s-4min depending on the agents
     and topic complexity."""
-    target_cwd = _resolve_cwd(cwd)
+    target_cwd = await asyncio.to_thread(_resolve_cwd, cwd)
     chosen, skipped = select_agents(
         agents,
         roles,
@@ -294,7 +295,7 @@ async def q_validate_start(
 
     Expected wall-clock to completion: 1-8min default; 4-15min when
     extended=true. Pick extended deliberately."""
-    target_cwd = _resolve_cwd(cwd)
+    target_cwd = await asyncio.to_thread(_resolve_cwd, cwd)
     chosen, skipped = select_agents(agents, roles, gemini_model=gemini_model, host=host)
     if not chosen:
         return await _no_live_seats_job(skipped)
@@ -376,7 +377,7 @@ async def q_review_start(
 
     Expected wall-clock to completion: 1-8min default; 4-15min when
     extended=true. Pick extended deliberately."""
-    target_cwd = _resolve_cwd(cwd)
+    target_cwd = await asyncio.to_thread(_resolve_cwd, cwd)
     chosen, skipped = select_agents(agents, roles, gemini_model=gemini_model, host=host)
     if not chosen:
         return await _no_live_seats_job(skipped)
