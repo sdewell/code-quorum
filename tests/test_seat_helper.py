@@ -688,9 +688,30 @@ def test_codex_helper_preserves_recorded_gemini_routing_metadata() -> None:
 # --- #125 hardening: timeout cap, effort check, inflight cap, cancel, grace ---
 
 
+def test_default_timeout_is_the_seat_print_timeout_and_fits_the_cap() -> None:
+    """One budget per review whichever host runs it, and the helper's client
+    deadline (timeout + gemini grace + margin) stays under the council cap."""
+    from quorum.agents import gemini_cli as gc
+    from quorum.council import AGENT_TIMEOUT_S
+
+    assert sh._HELPER_DEFAULT_TIMEOUT_S == gc.GEMINI_CLI_PRINT_TIMEOUT_S
+    deadline = (
+        sh._HELPER_DEFAULT_TIMEOUT_S
+        + sh._seat_grace_s("gemini")
+        + sh._HELPER_CLIENT_MARGIN_S
+    )
+    assert deadline < AGENT_TIMEOUT_S
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(10_000, 900.0), ("abc", 600.0), (-1, 600.0), (30, 30.0), (None, 600.0)],
+    [
+        (10_000, 900.0),
+        ("abc", sh._HELPER_DEFAULT_TIMEOUT_S),
+        (-1, sh._HELPER_DEFAULT_TIMEOUT_S),
+        (30, 30.0),
+        (None, sh._HELPER_DEFAULT_TIMEOUT_S),
+    ],
 )
 def test_effective_timeout_caps_and_defaults(raw: object, expected: float) -> None:
     assert sh._effective_timeout_s(raw) == expected

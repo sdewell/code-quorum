@@ -29,6 +29,7 @@ from .claude import ClaudeAgent
 from .gemini_cli import (
     AGY_STARTUP_CRASH_WINDOW_S,
     AGY_STARTUP_RETRY_DELAY_S,
+    GEMINI_CLI_PRINT_TIMEOUT_S,
     GEMINI_CLI_TIMEOUT_GRACE_S,
     GeminiCliAgent,
 )
@@ -44,7 +45,9 @@ RESULT_TTL_S = 300.0
 # cannot be imported here (council imports quorum.agents, so it would cycle);
 # a test pins the two together.
 HELPER_MAX_TIMEOUT_S = 900.0
-_HELPER_DEFAULT_TIMEOUT_S = 600.0
+# The Gemini seat's own print-timeout, so a review gets one budget whichever
+# host runs it (gemini_cli.GEMINI_CLI_PRINT_TIMEOUT_S explains the number).
+_HELPER_DEFAULT_TIMEOUT_S = GEMINI_CLI_PRINT_TIMEOUT_S
 # Requests the helper runs at once; further claimed requests wait their turn.
 HELPER_MAX_INFLIGHT = 8
 # Client slack past the helper's own deadline before it gives up on a result.
@@ -513,7 +516,7 @@ class SeatHelperAgent(Agent):
         effort: str | None = None,
         model_source: str = "shipped",
         recorded_cli_version: str | None = None,
-        timeout_s: float = 600.0,
+        timeout_s: float = _HELPER_DEFAULT_TIMEOUT_S,
         spool_dir: Path | None = None,
         poll_interval: float = 0.2,
     ) -> None:
@@ -758,7 +761,9 @@ async def _run_request(
     recorded_cli_version = (
         str(raw_recorded_version) if raw_recorded_version is not None else None
     )
-    timeout_s = _effective_timeout_s(payload.get("timeout_s", 600.0))
+    timeout_s = _effective_timeout_s(
+        payload.get("timeout_s", _HELPER_DEFAULT_TIMEOUT_S)
+    )
     agent: Agent
     if seat == "claude":
         effort = str(payload.get("effort") or CLAUDE_DEFAULT_EFFORT)

@@ -181,6 +181,20 @@ _FINDINGS_LINE_PREFIXES = (
     "held ",
 )
 _MARKDOWN_LEAD = "#*>-`_ \t"
+# A seat that fills the marker slot with a bare negation is reporting that
+# nothing was unreadable (the opencode seat opened two 2026-10-22 reviews with
+# `UNREADABLE TARGET: none — I read ...` and 19 completed reads behind it).
+# The negation counts only when it stands alone: any wrapping punctuation
+# before it (`**`, backtick, `<`, `(`), then the word, then end of line or a
+# non-alphanumeric character (a dash, `.`, `!`, a closing `**`). "none of the
+# files were readable" still reads as a self-report of an unread target because
+# a word follows. The payload arrives casefolded.
+_UNREAD_TARGET_NEGATIONS = ("none", "n/a", "nothing", "nil")
+_NEGATION_RE = re.compile(
+    r"^[^a-z0-9]*(?:"
+    + "|".join(re.escape(w) for w in _UNREAD_TARGET_NEGATIONS)
+    + r")\s*(?:$|[^a-z0-9\s])"
+)
 # Conservative fallback for a seat that says so in prose without the marker.
 # Phrases from a real transcript; keep this list short and specific.
 _UNREAD_TARGET_PHRASES = (
@@ -224,8 +238,9 @@ REVIEW_PROMPT = (
     "(reads denied, the revision is unreachable, no tool that can show it), "
     f"make the first line of your reply exactly `{UNREADABLE_TARGET_MARKER} "
     "<what you could not read, and why>` and then report only what you could "
-    "verify. Never report a finding about code you did not read as if you had "
-    "read it.\n"
+    "verify. When you could read the target, omit that line entirely and open "
+    "with your first finding, or say that you found none. Never report a "
+    "finding about code you did not read as if you had read it.\n"
     "\n"
     "Scope: apply your stance to the in-scope surface described below. If you "
     "spot something the scope declares out-of-scope or an accepted risk, note "
@@ -337,11 +352,15 @@ def _build_seat(
         and profile.name == "codex"
         and isinstance(agent, GeminiCliAgent)
     ):
+        # The seat's own print timeout is the request budget, stated here so a
+        # review gets one budget whichever host runs it by construction, not
+        # by the helper's default happening to match.
         return SeatHelperAgent(
             name,
             model=agent.model,
             model_source=agent.model_source,
             recorded_cli_version=agent.recorded_cli_version,
+            timeout_s=agent.print_timeout,
         )
     if (
         profile is not None
@@ -887,7 +906,8 @@ def format_liveness(
     later rounds but still appears here); durations sum across rounds.
     `✓` = produced output every round; `⚠ returned nothing` = exit 0 but empty
     in some round; `⚠ did not read the target` = round-1 output says the seat
-    could not read the reviewed revision (marker or known phrase in its preamble);
+    could not read the reviewed revision (the marker naming something unreadable,
+    or a known phrase, in its preamble; a marker with a bare `none` is a read seat);
     `unavailable (...)` = an expected auth, quota, install, or
     timeout condition; `✗ exit N` = another execution error in some round.
 
@@ -947,11 +967,13 @@ def format_liveness(
 def _did_not_read_target(output: str) -> bool:
     """True when a seat's preamble says it could not read the reviewed change:
     a line starting with UNREADABLE_TARGET_MARKER (markdown lead tokens and case
-    ignored) or carrying one of _UNREAD_TARGET_PHRASES. Only the preamble
-    counts -- the opening _UNREAD_TARGET_WINDOW non-blank seat lines, stopping
-    at the first findings-table line -- so a finding or a peer rebuttal that
-    quotes a phrase is never read as a self-report. Host-injected diagnostic
-    lines are skipped, not counted."""
+    ignored) or carrying one of _UNREAD_TARGET_PHRASES. A marker line whose
+    payload is a bare negation (`UNREADABLE TARGET: none`) is the opposite
+    self-report -- the seat read the target -- and ends the scan as read. Only
+    the preamble counts -- the opening _UNREAD_TARGET_WINDOW non-blank seat
+    lines, stopping at the first findings-table line -- so a finding or a peer
+    rebuttal that quotes a phrase is never read as a self-report. Host-injected
+    diagnostic lines are skipped, not counted."""
     marker = UNREADABLE_TARGET_MARKER.casefold()
     seen = 0
     for raw in output.splitlines():
@@ -961,12 +983,22 @@ def _did_not_read_target(output: str) -> bool:
         norm = line.lstrip(_MARKDOWN_LEAD).casefold()
         if norm.startswith(_FINDINGS_LINE_PREFIXES):
             return False
-        if norm.startswith(marker) or any(p in norm for p in _UNREAD_TARGET_PHRASES):
+        if norm.startswith(marker):
+            return not _marker_payload_is_negation(norm[len(marker) :])
+        if any(p in norm for p in _UNREAD_TARGET_PHRASES):
             return True
         seen += 1
         if seen >= _UNREAD_TARGET_WINDOW:
             return False
     return False
+
+
+def _marker_payload_is_negation(payload: str) -> bool:
+    """True when the casefolded text after UNREADABLE_TARGET_MARKER is a bare
+    negation (_NEGATION_RE): wrapping punctuation is ignored on both sides, so
+    `**UNREADABLE TARGET:** none`, `**UNREADABLE TARGET: none**`, `<none>` and
+    `none!` all count, while `none of the files were readable` does not."""
+    return _NEGATION_RE.match(payload) is not None
 
 
 def _liveness_error_status(result: AgentResult) -> str:

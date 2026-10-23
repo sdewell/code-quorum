@@ -880,6 +880,32 @@ def test_format_liveness_host_prefix_and_markdown_marker_is_detected() -> None:
     assert "⚠ did not read the target" in format_liveness(_unread_rounds(out))
 
 
+def test_format_liveness_marker_with_bare_negation_is_a_read_seat() -> None:
+    """A seat that fills the marker slot with a bare negation is reporting that
+    nothing was unreadable, not that it could not read. The opencode seat opened
+    two reviews on 2026-10-22 with `UNREADABLE TARGET: none — I read ...` and 19
+    completed reads behind it, and the header discounted its findings. The
+    negation must stand alone: "none of the files were readable" is still a
+    self-report of an unread target."""
+    read_openings = (
+        "UNREADABLE TARGET: none — I read `collect/annotate.py`, `collect/store.py`.",
+        "**UNREADABLE TARGET:** None.",
+        "UNREADABLE TARGET: n/a",
+        "**UNREADABLE TARGET: none**",
+        "UNREADABLE TARGET: `none`",
+        "UNREADABLE TARGET: none!",
+        "UNREADABLE TARGET: <none>",
+        "UNREADABLE TARGET: [none]",
+    )
+    for opening in read_openings:
+        out = f"{opening}\n\nFILE: collect/annotate.py:416\nSEVERITY: medium"
+        line = format_liveness(_unread_rounds(out))
+        assert "skeptic (gemini) ✓" in line, opening
+        assert "did not read" not in line, opening
+    unread = "UNREADABLE TARGET: none of the diff files were readable from this host"
+    assert "⚠ did not read the target" in format_liveness(_unread_rounds(unread))
+
+
 def test_format_liveness_round2_quoted_phrase_does_not_taint_seat() -> None:
     def res(output: str) -> AgentResult:
         return AgentResult(

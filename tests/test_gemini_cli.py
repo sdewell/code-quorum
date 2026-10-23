@@ -395,10 +395,15 @@ def test_build_command_shape() -> None:
     assert COUNCIL_CLI_PREAMBLE in printed
     assert cmd[cmd.index("--add-dir") + 1] == "/repo/proj"
     assert cmd[cmd.index("--model") + 1] == gc.DEFAULT_MODEL  # not a hardcoded str
-    # 600s matches the Codex-host seat helper's default: one budget per review
-    # whichever host runs it (the gbac runs of 2026-10-21/22 all died at the
-    # old 480s while helper-path successes had run to 642s).
-    assert cmd[cmd.index("--print-timeout") + 1] == "600s"
+    # One budget per review whichever host runs it: the Codex-host seat helper
+    # reads the same constant, so the number lives in one place (the gbac runs
+    # of 2026-10-21/22 died at the old 480s; one on 2026-10-22 died at 600s
+    # with the model still mid-turn).
+    assert (
+        cmd[cmd.index("--print-timeout") + 1]
+        == f"{int(gc.GEMINI_CLI_PRINT_TIMEOUT_S)}s"
+    )
+    assert gc.GEMINI_CLI_PRINT_TIMEOUT_S == 780.0
 
 
 def test_build_command_model_and_timeout_override() -> None:
@@ -1384,6 +1389,32 @@ def test_run_oauth_refresh_transport_retry_is_bounded_and_reports_network(
     assert all(log.exists() for log in logs)
 
 
+def test_run_skips_oauth_refresh_retry_once_the_budget_is_spent(
+    monkeypatch, tmp_path
+) -> None:
+    """The retry re-runs a full print-timeout + grace attempt (810s), so like
+    the quota reflex it is a budget decision anchored at run() entry. Without
+    the gate a refresh failure after a long first attempt earned a second full
+    run: 810 + 3 + 810 = 1623s against the council's 900s cap. A gate of 0s
+    makes any elapsed time too much, so the seat must report the network
+    failure without a second spawn and say why it did not retry."""
+    auth_stderr = b"Authentication required. Error: authentication timed out."
+    spawns = _patch_run_seams_sequenced(
+        monkeypatch, [(1, b"", auth_stderr), (1, b"", auth_stderr)], tmp_path
+    )
+    monkeypatch.setattr(gc, "AGY_AUTH_REFRESH_RETRY_DELAY_S", 0.0)
+    monkeypatch.setattr(gc, "AGY_AUTH_REFRESH_RETRY_MAX_ELAPSED_S", 0.0, raising=False)
+    _patch_auth_refresh_logs(monkeypatch, tmp_path, {1, 2})
+
+    result = asyncio.run(gc.GeminiCliAgent().run(prompt="x", cwd="/r"))
+
+    assert len(spawns) == 1
+    assert result.returncode == gc.GEMINI_CLI_NOT_LOGGED_IN_RC
+    assert result.unavailable_reason == "network"
+    assert "not retried" in result.error
+    assert "after one retry" not in result.error
+
+
 def test_run_does_not_retry_definitive_oauth_failure(monkeypatch, tmp_path) -> None:
     spawns = _patch_run_seams_sequenced(
         monkeypatch,
@@ -1831,7 +1862,7 @@ def test_resolved_backend_labels_reads_routing_from_the_log(tmp_path: Path) -> N
     [
         ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
         ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
-        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
         ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
         ("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
     ],
@@ -1945,6 +1976,35 @@ def _patch_run_logs(monkeypatch, tmp_path, quota_attempts, labels=None):
 
     monkeypatch.setattr(gc, "_new_run_log_path", _next)
     return paths
+
+
+def test_run_log_dir_is_isolated_from_the_real_agy_home(tmp_path: Path) -> None:
+    """The conftest autouse fixture points AGY_RUN_LOG_DIR under this test's
+    tmp_path for every non-live test. Without it, tests that reserve or retain
+    run logs through the real functions wrote zero-byte `code-quorum-kept-*`
+    files into ~/.gemini/antigravity-cli/log (31 of them on 2026-10-22), and
+    the seat's 20-file cap on kept logs then pruned real failure logs."""
+    assert gc.AGY_RUN_LOG_DIR.is_relative_to(tmp_path)
+
+
+def test_print_timeout_budget_fits_under_the_council_cap() -> None:
+    """Every Gemini seat path must end before quorum.council.AGENT_TIMEOUT_S
+    kills it, or the seat's own honest timeout report is never written: the
+    inner backstop, a startup-crash retry, and a quota-reflex fallback attempt
+    started at the reflex gate."""
+    from quorum.council import AGENT_TIMEOUT_S
+
+    backstop = gc.GEMINI_CLI_PRINT_TIMEOUT_S + gc.GEMINI_CLI_TIMEOUT_GRACE_S
+    assert backstop < AGENT_TIMEOUT_S
+    retry = gc.AGY_STARTUP_CRASH_WINDOW_S + gc.AGY_STARTUP_RETRY_DELAY_S + backstop
+    assert retry < AGENT_TIMEOUT_S
+    assert gc.AGY_QUOTA_REFLEX_MAX_ELAPSED_S + backstop < AGENT_TIMEOUT_S
+    auth_retry = (
+        gc.AGY_AUTH_REFRESH_RETRY_MAX_ELAPSED_S
+        + gc.AGY_AUTH_REFRESH_RETRY_DELAY_S
+        + backstop
+    )
+    assert auth_retry < AGENT_TIMEOUT_S
 
 
 def test_new_run_log_path_creates_missing_dir(monkeypatch, tmp_path: Path) -> None:
@@ -2766,10 +2826,10 @@ def test_factory_default_model_is_pro() -> None:  # conftest clears the env
 def test_factory_model_override(monkeypatch) -> None:
     # CODE_QUORUM_GEMINI_MODEL lets the user dial back to Flash (or any model)
     # without a code change -- the quota-adjust lever.
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-medium")
     agent = make_gemini_agent()
     assert isinstance(agent, GeminiCliAgent)
-    assert agent.model == "Gemini 3.8 Flash (High)"
+    assert agent.model == "Gemini 3.8 Flash (Medium)"
 
 
 def test_factory_model_env_override_empty_falls_back_to_default(monkeypatch) -> None:
@@ -2804,9 +2864,9 @@ def test_pro_slug_alias_is_case_insensitive() -> None:
 
 
 def test_advertised_flash_slug_is_rewritten_to_its_display_name() -> None:
-    agent = GeminiCliAgent(model="gemini-3.8-flash-high")
+    agent = GeminiCliAgent(model="gemini-3.8-flash-medium")
 
-    assert agent.model == "Gemini 3.8 Flash (High)"
+    assert agent.model == "Gemini 3.8 Flash (Medium)"
 
 
 def test_a_padded_misrouting_slug_is_still_rewritten() -> None:
@@ -2903,7 +2963,7 @@ def test_select_agents_gemini_cli_flag(monkeypatch) -> None:
 def test_factory_model_override_param_beats_env(monkeypatch) -> None:
     # The param is the per-invocation ask ("use Claude for this run"); the env
     # var is ambient session state. Explicit beats ambient.
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-medium")
     agent = make_gemini_agent(model_override="claude-opus-4-6-thinking")
     assert isinstance(agent, GeminiCliAgent)
     assert agent.model == "claude-opus-4-6-thinking"
@@ -2999,10 +3059,10 @@ def test_factory_env_override_source_is_env_not_recorded(
         "gemini", {"model": "recorded-model", "cli_version": "1.1.8"}, path
     )
     monkeypatch.setattr(mc, "CONFIG_PATH", path)
-    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-high")
+    monkeypatch.setenv("CODE_QUORUM_GEMINI_MODEL", "gemini-3.8-flash-medium")
     agent = make_gemini_agent()
     assert isinstance(agent, GeminiCliAgent)
-    assert agent.model == "Gemini 3.8 Flash (High)"
+    assert agent.model == "Gemini 3.8 Flash (Medium)"
     assert agent.model_source == "env"
     # The version-drift check is keyed off recorded_choice() alone, same as
     # codex/opencode -- it fires regardless of which source won the model.

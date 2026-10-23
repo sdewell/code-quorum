@@ -14,6 +14,21 @@ def _isolate_openrouter_keychain(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_agy_run_log_dir(request, tmp_path, monkeypatch):
+    from quorum.agents import gemini_cli
+
+    # Never write into the developer's real ~/.gemini/antigravity-cli/log: the
+    # seat keeps at most AGY_KEPT_LOG_MAX_FILES kept logs there and evicts the
+    # oldest, so zero-byte files reserved by tests pushed real failure logs out.
+    # Live canaries are exempt: they run the real agy under the seatbelt, which
+    # denies writes everywhere but agy's own state paths, so a log under
+    # tmp_path is never written and the routing line is never attested.
+    if request.node.get_closest_marker("live") is not None:
+        return
+    monkeypatch.setattr(gemini_cli, "AGY_RUN_LOG_DIR", tmp_path / "agy-log")
+
+
+@pytest.fixture(autouse=True)
 def _reset_version_caches():
     """claude/codex/opencode/agy `<binary> --version` results are cached in
     quorum.model_config.probe_cli_version (functools.cache, shared by every

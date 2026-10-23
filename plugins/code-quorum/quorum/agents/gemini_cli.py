@@ -57,9 +57,10 @@ logger = logging.getLogger(__name__)
 # the previous default, Gemini 3.1 Pro (High), from `agy models` (observed
 # 2026-10-22: every seat run exited 1 with "invalid model selection"). Pro-tier
 # spends quota faster than Flash across a multi-round, multi-seat council, so
-# dial back per run with CODE_QUORUM_GEMINI_MODEL="gemini-3.8-flash-high" (that
-# slug is verified to route correctly) or per-instance via
-# GeminiCliAgent(model=...).
+# dial back per run with CODE_QUORUM_GEMINI_MODEL="gemini-3.8-flash-medium"
+# (that slug is verified to route correctly; S moved the recorded Flash choice
+# from High to Medium on 2026-10-22 after High reviews ran 400-545s and one hit
+# the print timeout) or per-instance via GeminiCliAgent(model=...).
 DEFAULT_MODEL = "Gemini 4 Argon (High)"
 DEFAULT_MODEL_CATALOG_SLUG = "gemini-4-argon-high"
 
@@ -82,7 +83,7 @@ DEFAULT_MODEL_CATALOG_SLUG = "gemini-4-argon-high"
 # forms of the default stay one model.
 MODEL_ROUTING_ALIASES = {
     DEFAULT_MODEL_CATALOG_SLUG: DEFAULT_MODEL,
-    "gemini-3.8-flash-high": "Gemini 3.8 Flash (High)",
+    "gemini-3.8-flash-medium": "Gemini 3.8 Flash (Medium)",
 }
 
 
@@ -157,6 +158,9 @@ def seat_agent_definition() -> str:
         "You are a read-only reviewer. Use view_file, list_dir, grep_search and "
         "find_by_name to inspect the workspace. You have no write, edit, shell, "
         "browser or subagent tools; do not attempt them.\n"
+        "Budget your reading: open the files the task names and their direct "
+        "callers or callees, then write your answer. Do not survey the whole "
+        "tree; an answer that runs out of time is worth nothing.\n"
     )
 
 
@@ -292,7 +296,8 @@ REQUIRED_DENY = (
 # HOME's login-keychain link.
 # 1.4.5 verified 2026-10-22: all 14 live checks passed, the seat running as
 # its custom agent (the new canary has it find a file it was not told about)
-# on the repinned Gemini 4 Argon / Claude Opus 5.5 models.
+# on the repinned Gemini 4 Argon / Claude Opus 5.5 models. Re-verified the
+# same day after the Flash override moved to Gemini 3.8 Flash (Medium).
 SEAT_VERIFIED_AGY_VERSION = "1.4.5"
 
 
@@ -924,12 +929,23 @@ def check_seat_verified_version(installed: str | None = None) -> str | None:
     )
 
 
-# Grace added to agy's own --print-timeout for the inner wait_for backstop. The
-# layering is: agy self-terminates at --print-timeout (600s, the same default
-# the Codex-host seat helper applies, so a review gets one budget whichever
-# host runs it); if it wedges and ignores that, our inner wait_for fires at
-# 600+30=630s; the council's hard AGENT_TIMEOUT_S (900s) is the final cap. Kept
-# under 900 so the inner backstop wins for the default timeout.
+# The seat's --print-timeout, one budget whichever host runs the review: the
+# direct seat's default and the Codex-host seat helper's default both read it.
+# 780s, not 600s: with the four read tools, Gemini 3.8 Flash (High) round-1
+# reviews in the day after the agy 1.4.5 repair ran 400-545s, and the gbac
+# branch review of 2026-10-22 15:03 hit agy's 600s print timeout with the model
+# still mid-turn (68 model calls, no quota or auth error in its log). The
+# layering is: agy self-terminates at --print-timeout; if it wedges and ignores
+# that, our inner wait_for fires at 780+30=810s; the council's hard
+# AGENT_TIMEOUT_S (900s) is the final cap. 780 is the largest round value that
+# keeps every path under that cap: a quota-reflex fallback attempt after a
+# death inside AGY_QUOTA_REFLEX_MAX_ELAPSED_S (60s) ends by 60+810=870s, an
+# OAuth-refresh retry inside AGY_AUTH_REFRESH_RETRY_MAX_ELAPSED_S (60s) by
+# 60+3+810=873s, a startup-crash retry by 10+5+810=825s, and the helper's
+# client deadline (timeout + grace + 30s margin) at 860s. Contract tests pin
+# the sums.
+GEMINI_CLI_PRINT_TIMEOUT_S = 780.0
+# Grace added to agy's own --print-timeout for the inner wait_for backstop.
 GEMINI_CLI_TIMEOUT_GRACE_S = 30.0
 AGY_AUTH_CHECK_TIMEOUT_S = 20.0
 
@@ -982,7 +998,7 @@ AGY_AUTH_CHECK_TIMEOUT_S = 20.0
 #                  its own 10s subprocess timeout) is excluded, so a slow
 #                  probe cannot eat the window.
 # Worst case added by the retry: one crash-window + delay + one full attempt
-# (~10+5+630s), still under the council's 900s AGENT_TIMEOUT_S cap.
+# (~10+5+810s), still under the council's 900s AGENT_TIMEOUT_S cap.
 AGY_TRANSIENT_CRASH_MARKER = "Agent execution terminated due to error"
 AGY_STARTUP_CRASH_WINDOW_S = 10.0
 AGY_STARTUP_RETRY_DELAY_S = 5.0
@@ -992,7 +1008,16 @@ AGY_STARTUP_RETRY_DELAY_S = 5.0
 # failure. agy then falls into interactive OAuth, which a headless council seat
 # cannot complete. Retry the same attempt once; the failed leg consumed no model
 # quota because authentication never completed.
+#
+# The retry is a budget decision like the quota reflex below, anchored at
+# run() entry: a second attempt needs print-timeout + grace (810s), so it is
+# taken only while the first attempt died inside the elapsed gate, which keeps
+# the worst case at 60+3+810=873s under the council's 900s cap. A refresh
+# failure is a pre-turn event (seconds in); one that surfaces late in a long
+# turn is not something a second full run can fix inside the cap, and the
+# seat reports the network failure and says why it did not retry.
 AGY_AUTH_REFRESH_RETRY_DELAY_S = 3.0
+AGY_AUTH_REFRESH_RETRY_MAX_ELAPSED_S = 60.0
 _AGY_AUTH_REFRESH_TRANSPORT_MARKER = "token refresh failed due to network error"
 
 # --- Quota reflex: Gemini -> Claude fallback ---------------------------------
@@ -1016,8 +1041,8 @@ _AGY_AUTH_REFRESH_TRANSPORT_MARKER = "token refresh failed due to network error"
 # The elapsed gate is a BUDGET, deliberately anchored at run() entry -- unlike
 # the startup-crash window, which measures the attempt alone. The
 # council kills the seat at AGENT_TIMEOUT_S (900s), and a fallback attempt
-# needs print-timeout + grace (630s). Reflexing only under 60s of total
-# elapsed keeps the worst case ~690s. The 60s therefore INCLUDES preflight
+# needs print-timeout + grace (810s). Reflexing only under 60s of total
+# elapsed keeps the worst case ~870s. The 60s therefore INCLUDES preflight
 # (notably the `agy --version` probe, up to 10s) -- that is the point: the
 # budget bounds wall clock against the council cap, which is also anchored at
 # run() entry. Observed quota deaths are fast (~3s); the gate excludes only
@@ -1052,7 +1077,7 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # degraded -- a silently mis-routed fallback would make that label a lie too.
 # Flash is included because the documented quota-saver slug is normalized to its
 # display form; every alias target must be live-proven before that rewrite can be
-# called safe. Flash tracks the current 3.8 High choice; changing it requires
+# called safe. Flash tracks the current 3.8 Medium choice; changing it requires
 # rerunning the live verifier before advancing SEAT_VERIFIED_AGY_VERSION.
 # COVERAGE BOUNDARY, stated so the next person does not have to infer it: this
 # dict is exactly the models whose routing is PROVEN: the primary, the documented
@@ -1063,7 +1088,7 @@ QUOTA_REFLEX_OUTPUT_PREFIX = "[quota reflex:"
 # surface rather than covering the whole catalog.
 AGY_EXPECTED_BACKEND_LABEL = {
     DEFAULT_MODEL: "Gemini 4 Argon (High)",
-    "Gemini 3.8 Flash (High)": "Gemini 3.8 Flash (High)",
+    "Gemini 3.8 Flash (Medium)": "Gemini 3.8 Flash (Medium)",
     AGY_QUOTA_FALLBACK_MODEL: "Claude Opus 5.5 (High)",
 }
 
@@ -1347,6 +1372,30 @@ def _validated_quota_fallback_dir(path: str) -> str:
     return str(candidate)
 
 
+def _is_auth_refresh_transport_failure(
+    result: AgentResult, run_log: Path | None
+) -> bool:
+    """True when a not-logged-in failure is agy's OAuth access-token refresh
+    dying on a transient network error (the shape the one retry exists for)."""
+    return (
+        run_log is not None
+        and result.returncode == GEMINI_CLI_NOT_LOGGED_IN_RC
+        and not result.output
+        and _log_shows_auth_refresh_transport_failure(run_log)
+    )
+
+
+def _should_retry_auth_refresh(
+    result: AgentResult, elapsed_s: float, run_log: Path | None
+) -> bool:
+    """The auth-refresh retry predicate. `elapsed_s` is total run() wall time:
+    a budget bound (see AGY_AUTH_REFRESH_RETRY_MAX_ELAPSED_S), not a crash
+    signature, because the retry re-runs a full print-timeout + grace attempt."""
+    return elapsed_s < AGY_AUTH_REFRESH_RETRY_MAX_ELAPSED_S and (
+        _is_auth_refresh_transport_failure(result, run_log)
+    )
+
+
 def _is_transient_startup_crash(result: AgentResult, attempt_s: float) -> bool:
     """True when a seat result matches agy's transient startup-crash signature
     (see AGY_TRANSIENT_CRASH_MARKER above). Narrow on purpose: anything that
@@ -1485,7 +1534,7 @@ class GeminiCliAgent(Agent):
         self,
         binary: str = "agy",
         model: str = DEFAULT_MODEL,
-        print_timeout: float = 600.0,
+        print_timeout: float = GEMINI_CLI_PRINT_TIMEOUT_S,
         model_source: str = "shipped",
         recorded_cli_version: str | None = None,
     ):
@@ -1873,12 +1922,9 @@ class GeminiCliAgent(Agent):
                             f"{result.error}\n{note}" if result.error else note
                         )
             auth_retry_initial_log: Path | None = None
-            if (
-                active_log is not None
-                and result.returncode == GEMINI_CLI_NOT_LOGGED_IN_RC
-                and not result.output
-                and _log_shows_auth_refresh_transport_failure(active_log)
-            ):
+            auth_retry_skipped_at_s: float | None = None
+            auth_elapsed_s = time.monotonic() - start
+            if _should_retry_auth_refresh(result, auth_elapsed_s, active_log):
                 logger.warning(
                     "agy OAuth access-token refresh hit a transient network "
                     "failure; retrying once in %.0fs.",
@@ -1909,14 +1955,31 @@ class GeminiCliAgent(Agent):
                         result.error = (
                             f"{result.error}\n{note}" if result.error else note
                         )
+            elif _is_auth_refresh_transport_failure(result, active_log):
+                auth_retry_skipped_at_s = auth_elapsed_s
+                logger.warning(
+                    "agy OAuth access-token refresh hit a transient network "
+                    "failure %.0fs into the run; not retried, a second attempt "
+                    "needs %.0fs and the council caps the seat.",
+                    auth_elapsed_s,
+                    self.print_timeout + GEMINI_CLI_TIMEOUT_GRACE_S,
+                )
             if (
                 active_log is not None
                 and result.returncode == GEMINI_CLI_NOT_LOGGED_IN_RC
                 and _log_shows_auth_refresh_transport_failure(active_log)
             ):
                 result.unavailable_reason = "network"
+                if auth_retry_skipped_at_s is None:
+                    outcome = "after one retry"
+                else:
+                    outcome = (
+                        f"and was not retried: {auth_retry_skipped_at_s:.0f}s had "
+                        "elapsed and a second attempt would run past the council's "
+                        "cap"
+                    )
                 result.error = (
-                    "agy OAuth refresh failed after one retry because the Google "
+                    f"agy OAuth refresh failed {outcome} because the Google "
                     "token endpoint had a network error. " + result.error
                 )
             elapsed = time.monotonic() - start
