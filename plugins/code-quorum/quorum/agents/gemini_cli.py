@@ -298,7 +298,9 @@ REQUIRED_DENY = (
 # its custom agent (the new canary has it find a file it was not told about)
 # on the repinned Gemini 4 Argon / Claude Opus 5.5 models. Re-verified the
 # same day after the Flash override moved to Gemini 3.8 Flash (Medium).
-SEAT_VERIFIED_AGY_VERSION = "1.4.5"
+# 1.4.8 verified 2026-10-30: all 14 live containment and routing checks passed.
+# 1.4.11 verified 2026-10-30: all 14 live checks passed after agy self-updated.
+SEAT_VERIFIED_AGY_VERSION = "1.4.11"
 
 
 def _sbpl(path: str | Path) -> str:
