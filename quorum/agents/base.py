@@ -9,7 +9,7 @@ import stat
 import tempfile
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -627,7 +627,7 @@ class _Containment:
 @contextlib.asynccontextmanager
 async def _contained(
     proc: asyncio.subprocess.Process, pgid: int
-) -> AsyncIterator[_Containment]:
+) -> AsyncGenerator[_Containment]:
     """Shared setup/teardown for communicate_or_kill and
     communicate_lines_or_kill.
 

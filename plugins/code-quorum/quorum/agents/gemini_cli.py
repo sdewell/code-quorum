@@ -11,7 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Generator, Sequence
 from pathlib import Path
 
 from ..model_config import (
@@ -460,7 +460,7 @@ def _retire_private_agy_home(private: _PrivateAgyHome) -> None:
 
 
 @contextlib.contextmanager
-def private_agy_home() -> Iterator[tuple[Path, dict[str, str]]]:
+def private_agy_home() -> Generator[tuple[Path, dict[str, str]]]:
     """A per-run private agy HOME for a direct agy launch outside the seat.
 
     Yields (root, env): pass `agy_home=root` to build_sandbox_profile and run
@@ -1325,7 +1325,7 @@ def _should_quota_reflex(
 
 
 @contextlib.contextmanager
-def _quota_fallback_handoff(prompt: str) -> Iterator[tuple[str, Path]]:
+def _quota_fallback_handoff(prompt: str) -> Generator[tuple[str, Path]]:
     """Stage a full fallback request privately and yield a short agy prompt.
 
     On agy 1.1.19, a non-trivial prompt selected for the Claude fallback can
