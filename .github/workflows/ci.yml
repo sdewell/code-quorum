@@ -11,7 +11,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           python-version: "3.13"
@@ -37,5 +37,30 @@ jobs:
       - name: Version sync check
         run: uv run python scripts/sync_version.py --check
 
-      - name: Pytest
-        run: uv run pytest tests/ -q
+      # The suite is the repo's `.suite-command`, the same one-line command the
+      # pre-push gate runs through suite-run, so CI and the local gate cannot
+      # drift apart (ledger slug ci-workflow-runs-suite-command, 2026-11-03).
+      # Copied from ~/.claude/templates/workflow-quality-python.yml.
+      # TWIN: change suite-run's parse rule and this step together.
+      - name: Run the suite (.suite-command)
+        run: |
+          if [ -L .suite-command ]; then
+            echo "::error::.suite-command is a symlink; it must be a regular file committed in the repo"
+            exit 1
+          fi
+          if [ ! -f .suite-command ]; then
+            echo "::error::.suite-command is missing; add the repo's full test command on one line (a lint or build if it has no tests)"
+            exit 1
+          fi
+          cmd=$(awk '{ s = $0; sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); if (s != "" && substr(s, 1, 1) != "#") print s }' .suite-command)
+          n=$(printf '%s' "$cmd" | awk 'END { print NR }')
+          if [ "$n" -eq 0 ]; then
+            echo "::error::.suite-command holds no command line (only blanks and comments)"
+            exit 1
+          fi
+          if [ "$n" -gt 1 ]; then
+            echo "::error::.suite-command has $n command lines; it must hold exactly one (chain with && if needed)"
+            exit 1
+          fi
+          echo "Suite command: $cmd"
+          /bin/sh -c "$cmd"
